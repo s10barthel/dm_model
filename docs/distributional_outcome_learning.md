@@ -51,3 +51,6 @@ Normal inference outputs remain expected values. No new scoring-versus-conceding
 Implementation verification covered 321 passing targeted tests, including original-scalar-decoder equality, categorical target reconstruction, all four supported encoder paths, real training/checkpoint publication for both outcome tasks, exact interrupted-versus-uninterrupted resume, source-refit support inheritance, and probability/expectation export round trips. Broader checks also encountered baseline self-loop, visualization-fixture and pc-xPass-cache failures; these were reproduced with the original relevant code.
 
 A small CPU benchmark with one thread, 128 synthetic six-node graphs and ten timed forward-and-decode iterations measured 34.9 ms for scalar and 38.3 ms for 65-atom distributional output. Trainable parameters increased from 366,706 to 368,882. Raw output tensors increased from 6,144 to 399,360 bytes. These figures describe that synthetic workload, not full-match training performance. The benchmark record is `out/distributional_learning_benchmark.json`.
+
+
+An additional explicit occurrence/severity alternative is documented in [decomposition_outcome_learning.md](decomposition_outcome_learning.md). It preserves the existing outcome components and is restricted to absolute xT targets.

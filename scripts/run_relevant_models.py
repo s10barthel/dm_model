@@ -88,6 +88,7 @@ from xt_versions import xt_options_for_feature_root
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_warning_argument(parser)
+    parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome probabilities alongside component means.")
     add_inference_mask_arguments(parser)
     add_frame_selection_arguments(parser)
@@ -743,6 +744,8 @@ def main() -> None:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
     from models.outcome_learning import configure_distribution_exports
     configure_distribution_exports(model_specs, args.export_outcome_distributions)
+    from models.outcome_decomposition import configure_exports
+    configure_exports(model_specs, getattr(args, "export_outcome_decomposition", False))
     configure_auxiliary_models(args, model_specs, device)
     graph_schema = validate_model_graph_schemas(model_specs)
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
@@ -932,11 +935,16 @@ def main() -> None:
                     for model in model_specs.values():
                         if hasattr(model, "outcome_distribution_rows"):
                             model.outcome_distribution_rows.clear()
+                        if hasattr(model, "outcome_decomposition_rows"):
+                            model.outcome_decomposition_rows.clear()
                     components = infer_skillcorner_components(state, model_specs, device=device, **runtime_kwargs(model_specs, pass_success_runtime))
                     valid_state_count += 1
                     records = [row for model in model_specs.values() for row in getattr(model, "outcome_distribution_rows", [])]
                     if records:
                         tables.setdefault("outcome_distributions", []).append(pd.DataFrame(records))
+                    decomposed_records = [row for model in model_specs.values() for row in getattr(model, "outcome_decomposition_rows", [])]
+                    if decomposed_records:
+                        tables.setdefault("outcome_decomposition", []).append(pd.DataFrame(decomposed_records))
                     for name, prediction in components.items():
                         if prediction is None or prediction.empty:
                             prediction = blank_state_predictions(state)

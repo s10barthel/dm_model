@@ -110,6 +110,8 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--decomposition", action="store_true", help="Show occurrence x severity below players for individual outcome components.")
+    parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
@@ -215,6 +217,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser, repeatable=True)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
+    from scripts.outcome_decomposition_visualization import validate_options
+    try:
+        validate_options(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.compare_intended_receiver and args.no_success_intent:
         parser.error("--compare-intended-receiver cannot be combined with --no-success-intent.")
     pc_versions.check_selectors(args)
@@ -686,6 +693,8 @@ def render_component(
     if component_name in {"pass_success", "model_pass_success", "pass_score"} and component_probs.dropna().empty:
         title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
+    from scripts.outcome_decomposition_visualization import annotate as annotate_decomposition
+    annotate_decomposition(ax, snapshot, attacking_prefix, probs, rotate_pitch=rotate_pitch)
     legend_handles = []
     if player_rings:
         for mode, (color, diameter) in INTENDED_RECEIVER_STYLES.items():
@@ -828,7 +837,11 @@ def collect_action_components(
                 **state_inputs,
             )
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
-                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[model_index]
+                row = probs.loc[model_index]
+                if "outcome_decomposition" in probs.attrs:
+                    row.attrs.update(probs.attrs)
+                    row.attrs["decomposition_action_index"] = model_index
+                component_prob_rows[f"{component_name}_{outcome_case}"] = row
         else:
             if component_name == "success_intent":
                 component_prob_rows[component_name] = run_success_intent_component(
@@ -1129,6 +1142,8 @@ def main() -> None:
     loaded_models = ComponentModels({name: load_model(model_id, device) for name, model_id in selected_model_ids.items()} )
     from models.outcome_learning import configure_distribution_exports
     configure_distribution_exports(loaded_models, getattr(args, "export_outcome_distributions", False))
+    from models.outcome_decomposition import configure_exports
+    configure_exports(loaded_models, getattr(args, "export_outcome_decomposition", False))
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
@@ -1180,6 +1195,8 @@ def main() -> None:
     selected_physical_xpass_metric = physical_xpass_metric(args)
     component_selection = finish_inference_selection(
         args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
+    from scripts.outcome_decomposition_visualization import validate_models
+    validate_models(args, component_selection.rendered_components, loaded_models)
     pass_success_model = loaded_models.get("pass_success")
     pass_success_runtime = configure_xpass_runtime(args, loaded_models, physical_cache_dir)
     validate_pc_xpass_startup(pass_success_runtime)
@@ -1366,6 +1383,8 @@ def main() -> None:
     metadata.update(selection_metadata(args))
     from models.outcome_learning import write_distribution_exports
     metadata["outcome_distribution_exports"] = write_distribution_exports(output_root, loaded_models)
+    from models.outcome_decomposition import write_exports
+    metadata["outcome_decomposition_exports"] = write_exports(output_root, loaded_models)
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_runtime is not None and (
         model_uses_physical_xpass(pass_success_runtime.args) or inference_uses_physical_xpass(pass_success_runtime.args)

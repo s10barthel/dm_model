@@ -57,6 +57,9 @@ def configure_outcome_learning(args, metadata, source=None):
     elif args.get("outcome_learning_contract") is not None:
         raise ValueError("Outcome learning contract conflicts with feature targets.")
     normalize_learning_settings(args)
+    if args.get("learning_mode") == "decomposition" and (
+            not args.get("use_xt") or target["representation"] != "absolute"):
+        raise ValueError("Decomposition requires absolute xT targets; gain is forbidden.")
     return contract
 
 
@@ -77,8 +80,10 @@ def goal_ranking_metrics(target, prediction):
 
 
 def add_learning_arguments(parser):
-    parser.add_argument("--learning-mode", choices=("scalar", "distributional"), default=None,
+    parser.add_argument("--learning-mode", choices=("scalar", "distributional", "decomposition"), default=None,
                         help="Outcome learning mode; fresh training defaults to scalar.")
+    parser.add_argument("--severity-mode", choices=("scalar", "distributional"), default=None,
+                        help="Conditional severity head for decomposition (default: scalar).")
     parser.add_argument("--distribution-atoms", type=int, default=None,
                         help="Maximum categorical atom count, including domain endpoints and zero (default: 65).")
 
@@ -87,8 +92,16 @@ def normalize_learning_settings(args, source=None):
     args = settings(args)
     source = settings(source) if source is not None else None
     mode = args.get("learning_mode") or (source or {}).get("learning_mode", "scalar")
-    if mode not in ("scalar", "distributional"):
+    if mode not in ("scalar", "distributional", "decomposition"):
         raise ValueError(f"Unknown learning mode: {mode}")
+    if mode == "decomposition":
+        if source is not None and source.get("learning_mode", "scalar") != mode:
+            raise ValueError("Resume/refit cannot change the saved learning mode.")
+        from models.outcome_decomposition import normalize
+        args["learning_mode"] = mode
+        return normalize(args, source)
+    if args.get("severity_mode") is not None:
+        raise ValueError("--severity-mode requires --learning-mode decomposition.")
     count = args.get("distribution_atoms")
     if count is None:
         count = (source or {}).get("distribution_atoms") or DEFAULT_ATOMS
@@ -183,6 +196,17 @@ def validate_learning_metadata(args, metadata):
         validate_training_targets(definition, args.get("return_type"), args=args)
     if "learning_mode" in metadata and metadata["learning_mode"] != args["learning_mode"]:
         raise ValueError("Checkpoint args and metadata disagree on learning mode.")
+    if args.get("learning_mode") == "decomposition":
+        from models.outcome_decomposition import validate_definition as validate_decomposition
+        decomposition = validate_decomposition(args.get("outcome_decomposition_definition"))
+        if not args.get("use_xt") or decomposition["target_definition"] != args.get("xt_target_definition"):
+            raise ValueError("Decomposition requires its saved absolute xT target definition.")
+        if metadata.get("checkpoint_monitor", "mean_soft_bce") != "mean_soft_bce":
+            raise ValueError("Decomposition metadata has an incompatible checkpoint monitor.")
+        if metadata.get("severity_mode", args["severity_mode"]) != args["severity_mode"]:
+            raise ValueError("Checkpoint args and metadata disagree on severity mode.")
+        if metadata.get("outcome_decomposition_definition", decomposition) != decomposition:
+            raise ValueError("Checkpoint args and metadata disagree on decomposition definition.")
     if is_distributional(args):
         definition = validate_definition(args.get("outcome_distribution_definition"))
         if metadata.get("outcome_distribution_definition", definition) != definition:
@@ -313,6 +337,9 @@ def categorical_probabilities(logits, args=None):
 
 
 def expected_values(logits, args):
+    from models.outcome_decomposition import is_decomposition, decode
+    if is_decomposition(args):
+        return decode(logits, args)["prediction"]
     if not is_distributional(args):
         if is_signed(args):
             return torch.where(torch.isneginf(logits), torch.zeros_like(logits), logits)
@@ -355,12 +382,23 @@ def crps(logits, targets, args):
 def distribution_identity(args):
     args = settings(args)
     return {"learning_mode": args.get("learning_mode", "scalar"),
+            "severity_mode": args.get("severity_mode"),
+            "outcome_decomposition_definition": args.get("outcome_decomposition_definition"),
             "outcome_learning_contract": args.get("outcome_learning_contract"),
             "outcome_distribution_definition": args.get("outcome_distribution_definition"),
             "checkpoint_monitor": args.get("checkpoint_monitor", "ce_loss")}
 
 
 def validate_state_support(state_dict, args):
+    from models.outcome_decomposition import is_decomposition, validate_definition as validate_decomposition
+    if is_decomposition(args):
+        definition = validate_decomposition(settings(args).get("outcome_decomposition_definition"))
+        if definition["severity_mode"] == "distributional":
+            expected = torch.tensor(definition["severity_distribution"]["atoms"], dtype=torch.float32)
+            actual = state_dict.get("decoder.outcome_atoms")
+            if actual is None or not torch.equal(actual.detach().cpu().float(), expected):
+                raise ValueError("Checkpoint severity atom buffer disagrees with its definition.")
+        return
     if not is_distributional(args):
         return
     expected = torch.tensor(validate_definition(settings(args).get("outcome_distribution_definition"))["atoms"], dtype=torch.float32)
@@ -371,7 +409,8 @@ def validate_state_support(state_dict, args):
 
 def configure_distribution_exports(models, enabled):
     for model in models.values():
-        if model is not None and enabled and is_distributional(model.args):
+        if model is not None and enabled and (is_distributional(model.args) or
+                (model.args.get("learning_mode") == "decomposition" and model.args.get("severity_mode") == "distributional")):
             model.outcome_distribution_rows = []
 
 
@@ -385,7 +424,10 @@ def write_distribution_exports(directory, models):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(directory / "outcome_distributions.parquet", index=False)
-    definitions = {model.args.get("model_id", task): model.args["outcome_distribution_definition"]
-                   for task, model in models.items() if model is not None and is_distributional(model.args)}
+    definitions = {model.args.get("model_id", task):
+                   (model.args["outcome_distribution_definition"] if is_distributional(model.args) else
+                    model.args["outcome_decomposition_definition"]["severity_distribution"])
+                   for task, model in models.items() if model is not None and
+                   (is_distributional(model.args) or model.args.get("severity_mode") == "distributional")}
     (directory / "outcome_distribution_definitions.json").write_text(json.dumps(definitions, indent=2), encoding="utf-8")
     return str(directory / "outcome_distributions.parquet")

@@ -1390,6 +1390,7 @@ def inference_gnn(
                         ]
                     )
 
+    decomposition_predictions = {0: {}, 1: {}}
     players = set()
     final_players = set()
     model_probs = []
@@ -1434,6 +1435,40 @@ def inference_gnn(
             if model.args["include_out"]:
                 player_indices_i.append("out")
 
+        from models.outcome_decomposition import is_decomposition, decode as decode_decomposition
+        if is_decomposition(model.args):
+            from models.inference_masks import inference_mask_metadata
+            decoded = {key: value.detach().cpu().numpy() for key, value in
+                       decode_decomposition(out[batch == i], model.args).items()}
+            mask_id = inference_mask_metadata(model)["configuration_id"]
+            for branch in (0, 1):
+                pairs = {}
+                for ci, candidate in enumerate(player_indices_i):
+                    q = float(decoded["occurrence_probability"][ci, branch])
+                    m = float(decoded["conditional_severity"][ci, branch])
+                    pairs[candidate] = [q, m]
+                    row = {"match_id": str(getattr(match, "match_id", "")),
+                        "scene_id": str(getattr(match, "situation_id", getattr(match, "match_id", ""))),
+                        "action_index": event_index, "frame_id": frame, "candidate_id": candidate,
+                        "task": model.args["task"], "model_id": model.args.get("model_id"),
+                        "inference_mask_id": mask_id, "execution_branch": branch,
+                        "prediction": float(probs_i[ci, branch]), "occurrence_probability": q,
+                        "conditional_severity": m, "forced": bool(decoded["forced"][ci, branch]),
+                        "missing": bool(decoded["missing"][ci, branch]),
+                        "definition_id": model.args["outcome_decomposition_definition"]["definition_sha256"]}
+                    collector = getattr(model, "outcome_decomposition_rows", None)
+                    if collector is not None:
+                        collector.append(row)
+                    collector = getattr(model, "outcome_distribution_rows", None)
+                    if collector is not None and model.args["severity_mode"] == "distributional":
+                        from models.outcome_decomposition import severity_args
+                        from models.outcome_learning import categorical_probabilities
+                        probabilities = categorical_probabilities(out[batch == i][ci, branch, 1:], severity_args(model.args)).detach().cpu().tolist()
+                        if row["forced"] or row["missing"]:
+                            probabilities = None
+                        collector.append({**row, "probabilities": probabilities, "distribution_kind": "conditional_severity",
+                            "support_definition_id": model.args["outcome_decomposition_definition"]["severity_distribution"]["definition_sha256"]})
+                decomposition_predictions[branch][event_index] = pairs
         collector = getattr(model, "outcome_distribution_rows", None)
         if collector is not None:
             from models.outcome_learning import is_distributional, categorical_probabilities
@@ -1618,6 +1653,11 @@ def inference_gnn(
     if model.args["task"] in two_case_tasks:
         probs_0 = pd.DataFrame(probs_0).set_index("index")[players]
         probs_1 = pd.DataFrame(probs_1).set_index("index")[players]
+        if is_decomposition(model.args):
+            probs_0.attrs["outcome_decomposition"] = decomposition_predictions[0]
+            probs_1.attrs["outcome_decomposition"] = decomposition_predictions[1]
+            for table in (probs_0, probs_1):
+                table.attrs["show_outcome_decomposition"] = bool(getattr(model, "visualize_outcome_decomposition", False))
         return probs_0, probs_1
     else:
         final_columns = [player for player in players if player in final_players]

@@ -935,6 +935,9 @@ def load_hawkeye_component_run(component_dir: str | Path) -> tuple[pd.DataFrame,
         )
 
     component_export = pd.read_parquet(parquet_path)
+    decomposition_path = component_dir / "outcome_decomposition.parquet"
+    if decomposition_path.exists():
+        component_export.attrs["outcome_decomposition_path"] = str(decomposition_path)
     if "id" not in component_export.columns:
         raise KeyError(f"Hawkeye component export at {parquet_path} is missing the required 'id' column.")
     component_export["id"] = component_export["id"].astype(str)
@@ -1062,6 +1065,10 @@ def build_hawkeye_component_tables(
         component_frame.columns = component_frame.columns.astype(str)
         component_tables[component_name] = component_frame
 
+    if component_export.attrs.get("show_outcome_decomposition"):
+        from scripts.outcome_decomposition_visualization import attach_saved
+        attach_saved(component_tables, component_export.attrs["outcome_decomposition_rows"], situation.situation_id,
+                     component_export.attrs.get("decomposition_components"))
     return component_tables
 
 

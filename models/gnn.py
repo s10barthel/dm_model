@@ -180,6 +180,16 @@ class Decoder(nn.Module):
         graph_in_dim = args["graph_emb_dim"]
         mlp_dims = [args.get("mlp_h1_dim", 32), args.get("mlp_h2_dim", 8)]
         out_dim = args["out_dim"]
+        from models.outcome_decomposition import is_decomposition, validate_definition as validate_decomposition
+        self.decomposition_width = 0
+        if is_decomposition(args):
+            normalize_learning_settings(args)
+            decomposition = validate_decomposition(args.get("outcome_decomposition_definition"))
+            support = decomposition.get("severity_distribution")
+            self.decomposition_width = 1 + (support["effective_atoms"] if support else 1)
+            if support:
+                self.register_buffer("outcome_atoms", torch.tensor(support["atoms"], dtype=torch.float32))
+            out_dim = 2 * self.decomposition_width
         self.distribution_atoms = 0
         if is_distributional(args):
             normalize_learning_settings(args)
@@ -370,6 +380,8 @@ class Decoder(nn.Module):
                     node_inputs = torch.cat([node_inputs, physical_xpass_logit.unsqueeze(-1)], -1)
 
             node_outputs = self.nodewise_mlp(node_inputs)  # [N, 1] or [N, 2]
+            if self.decomposition_width:
+                node_outputs = node_outputs.reshape(-1, 2, self.decomposition_width)
             if self.distribution_atoms:
                 node_outputs = node_outputs.reshape(-1, 2, self.distribution_atoms)
             if node_outputs.shape[-1] == 1:

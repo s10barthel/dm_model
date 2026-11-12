@@ -26,6 +26,8 @@ SUMMARY_COLUMNS = [
     "intended_receiver_mode",
     "target_family",
     "learning_mode",
+    "severity_mode",
+    "outcome_decomposition_definition",
     "outcome_distribution_definition",
     "return_type",
     "xy_only",
@@ -280,6 +282,8 @@ def _fill_model_fields(
         args.get("return_type"),
     )
     row["learning_mode"] = _first_value((record or {}).get("learning_mode"), metadata.get("learning_mode"), args.get("learning_mode"), "scalar")
+    row["severity_mode"] = args.get("severity_mode")
+    row["outcome_decomposition_definition"] = _first_value(metadata.get("outcome_decomposition_definition"), args.get("outcome_decomposition_definition"))
     row["outcome_distribution_definition"] = _first_value(metadata.get("outcome_distribution_definition"), args.get("outcome_distribution_definition"))
     for key in FEATURE_COLUMNS:
         row[key] = signature.get(key, args.get(key, ""))

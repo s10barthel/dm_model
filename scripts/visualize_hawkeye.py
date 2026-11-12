@@ -81,6 +81,7 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--decomposition", action="store_true", help="Show occurrence x severity below players for individual outcome components.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical distributions when comparing checkpoints; saved-component mode has no model logits.")
     add_compare_argument(parser)
     parser.add_argument("--mode", choices=["standard", "loc", "freeze"], default="standard")
@@ -154,6 +155,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
     args = parser.parse_args(argv)
+    from scripts.outcome_decomposition_visualization import validate_options
+    try:
+        validate_options(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     resolve_saved_xpass_selectors(parser, args)
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
@@ -283,6 +289,8 @@ def render_frame_image(
             fontsize=12,
             color="black",
         )
+    from scripts.outcome_decomposition_visualization import annotate as annotate_decomposition
+    annotate_decomposition(ax, snapshot, attacking_prefix, probs)
     add_overlay_annotations(
         ax,
         snapshot,

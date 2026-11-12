@@ -150,6 +150,8 @@ def resolve_variants(args, mod, sportec, warning_collector=None):
                 model.eval()
                 from models.outcome_learning import configure_distribution_exports
                 configure_distribution_exports({task: model}, getattr(args, "export_outcome_distributions", False))
+                from models.outcome_decomposition import configure_exports
+                configure_exports({task: model}, getattr(args, "export_outcome_decomposition", False))
                 models[model_id] = model
             pipeline_records[task] = records[model_id]
             pipeline_models[task] = models[model_id]
@@ -478,6 +480,9 @@ def run_comparison(args, mod):
         with active_variant(variant, "preflight"):
             validate_pc_xpass_startup(variant.models.get("pass_success", getattr(variant.models, "xpass_runtime", None)))
     names = list(selection.rendered_components)
+    from scripts.outcome_decomposition_visualization import validate_models
+    for variant in variants:
+        validate_models(args, names, variant.models)
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.policy = policy
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
@@ -535,6 +540,8 @@ def run_comparison(args, mod):
     from models.outcome_learning import write_distribution_exports
     distribution_models = {str(id(model)): model for variant in variants for model in variant.models.values() if model is not None}
     write_distribution_exports(root / "distribution_exports", distribution_models)
+    from models.outcome_decomposition import write_exports
+    write_exports(root / "decomposition_exports", distribution_models)
     print(f"Saved {dataset} comparison visualizations and prediction tables to {root}")
 
 

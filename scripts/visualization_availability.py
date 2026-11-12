@@ -28,6 +28,8 @@ def select_inference_components(args, model_ids, *, include_success_intent=False
 def finish_inference_selection(args, cache_dir, metric, version):
     from physical_pass_model import PhysicalXpassMetricUnavailable, validate_x_pass_version_available
     selection = args._component_selection
+    from scripts.outcome_decomposition_visualization import validate_components
+    validate_components(args, selection.rendered_components)
     available = set(args._available_component_inputs)
     reasons = {}
     if "physical_xpass" in selection.rendered_components:
@@ -81,6 +83,17 @@ def saved_component_inputs(raw, metadata=None):
 
 def select_saved_components(args, raw, metadata, dataset, resolver, *, component_id=None, report=True, allow_empty=False):
     selection = resolve_component_selection(args)
+    from scripts.outcome_decomposition_visualization import validate_components
+    validate_components(args, selection.rendered_components)
+    if getattr(args, "decomposition", False):
+        path = getattr(raw, "attrs", {}).get("outcome_decomposition_path")
+        if path and not raw.attrs.get("outcome_decomposition_rows"):
+            import pandas as pd
+            raw.attrs["outcome_decomposition_rows"] = pd.read_parquet(path).to_dict("records")
+        if raw is None or not getattr(raw, "attrs", {}).get("outcome_decomposition_rows"):
+            raise ValueError("--decomposition requires saved occurrence/severity predictions; use live checkpoint visualization or regenerate component exports with --export-outcome-decomposition.")
+        raw.attrs["show_outcome_decomposition"] = True
+        raw.attrs["decomposition_components"] = selection.rendered_components
     component_id = component_id or metadata.get("run_id")
     available = saved_component_inputs(raw, metadata)
     if {"model_pass_success", "compare_pass_success"} & set(selection.explicit_component_groups):

@@ -82,6 +82,8 @@ from project_config import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and severity for saved visualizations.")
+    parser.add_argument("--export-outcome-distributions", action="store_true")
     add_warning_argument(parser)
     add_inference_mask_arguments(parser)
     parser.add_argument(
@@ -357,6 +359,10 @@ def main() -> None:
         physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
             pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
         )
+    from models.outcome_decomposition import configure_exports
+    from models.outcome_learning import configure_distribution_exports
+    configure_exports(model_specs, args.export_outcome_decomposition)
+    configure_distribution_exports(model_specs, args.export_outcome_distributions)
     lane_survival_cache_dir = pc_versions.lane_cache_dir("hawkeye", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
@@ -516,6 +522,10 @@ def main() -> None:
     if not processed_situation_ids:
         raise RuntimeError("No usable Hawkeye situations were processed.")
 
+    from models.outcome_decomposition import write_exports
+    from models.outcome_learning import write_distribution_exports
+    metadata["outcome_decomposition_exports"] = write_exports(output_dir, model_specs)
+    metadata["outcome_distribution_exports"] = write_distribution_exports(output_dir, model_specs)
     hawkeye_table = pd.concat(export_tables, ignore_index=True) if export_tables else pd.DataFrame()
     metadata.update(finalize_pc_xpass_attempt())
     parquet_path = output_dir / "hawkeye_data.parquet"

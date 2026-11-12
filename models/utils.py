@@ -380,6 +380,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "target_family",
             "learning_mode",
             "outcome_distribution_definition",
+            "severity_mode", "outcome_decomposition_definition",
             "outcome_learning_contract",
             "checkpoint_monitor",
             "return_type",
@@ -1939,6 +1940,9 @@ def run_epoch(
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
     from models.observed_selection import observed_layout, select_observed
     from models.outcome_learning import is_distributional, is_signed, distribution_loss, expected_values, mean_bce, mean_mse, crps, categorical_probabilities
+    from models.outcome_decomposition import (is_decomposition, decode as decode_decomposition,
+        losses as decomposition_losses, mean_bce as decomposition_bce, distribution_diagnostics)
+    decomposition = is_decomposition(args)
     distributional = is_distributional(args)
     signed = is_signed(args)
     from models.graph_diagnostics import DiagnosticCollater, validate_with_snapshot
@@ -1961,6 +1965,8 @@ def run_epoch(
     if signed:
         metrics.pop("ce_loss", None)
         metrics["mse_loss"] = 0.
+    if decomposition:
+        metrics.update(decomposition_loss=0., occurrence_bce=0., severity_loss_contribution=0., mean_soft_bce=0.)
     if distributional:
         metrics.update(distributional_ce=0., distribution_crps=0.)
         if not signed:
@@ -2002,6 +2008,9 @@ def run_epoch(
     outcome_execution_branches: list[np.ndarray] = []
     outcome_match_ids: list[np.ndarray] = []
     distribution_rows = []
+    decomposition_rows = []
+    decomposition_q, decomposition_m = [], []
+    decomposition_severity_ce, decomposition_severity_crps, decomposition_crps = [], [], []
     outcome_candidate_x = []
     learning_curve_rows: list[dict] = []
 
@@ -2289,7 +2298,44 @@ def run_epoch(
                 pred = select_observed(out, observed_positions, observed_branches)
 
                 target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
-                if distributional:
+                if decomposition:
+                    pred_loss, occurrence_loss, severity_loss = decomposition_losses(pred, target, args, batch_ipw)
+                    expected_bce = decomposition_bce(pred, target, args, batch_ipw)
+                    size = batch_graphs.num_graphs
+                    for key, value in (("decomposition_loss", pred_loss), ("occurrence_bce", occurrence_loss),
+                                       ("severity_loss_contribution", severity_loss), ("mean_soft_bce", expected_bce)):
+                        metrics[key] += value.detach().item() * size
+                    decoded = decode_decomposition(pred.detach(), args)
+                    y_hat = decoded["prediction"].cpu().numpy()
+                    q = decoded["occurrence_probability"].cpu().numpy()
+                    m = decoded["conditional_severity"].cpu().numpy()
+                    decomposition_q.append(q)
+                    decomposition_m.append(m)
+                    if args.severity_mode == "distributional":
+                        ce, conditional_crps, joint_crps = distribution_diagnostics(pred.detach(), target, args)
+                        decomposition_severity_ce.append(ce.cpu().numpy())
+                        decomposition_severity_crps.append(conditional_crps.cpu().numpy())
+                        decomposition_crps.append(joint_crps.cpu().numpy())
+                    if return_outcome_evaluation and (getattr(args, "export_outcome_decomposition", False)
+                            or getattr(args, "export_outcome_distributions", False)):
+                        from models.prediction_identity import observed_receiver_identities
+                        ids = observed_receiver_identities(batch_graphs, batch_labels)
+                        definition_id = args.outcome_decomposition_definition["definition_sha256"]
+                        for gi in range(size):
+                            row = {"model_id": getattr(args, "model_id", None), "task": args.task,
+                                "match_id": str(batch_graphs.evaluation_match_id[gi]),
+                                "action_index": int(batch_labels[gi, LABEL_INDEX["action_index"]]),
+                                "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                                "candidate_id": ids[gi], "execution_branch": int(outcome[gi]),
+                                "target": float(target[gi]), "occurrence_label": int(target[gi] > 0),
+                                "prediction": float(y_hat[gi]), "occurrence_probability": float(q[gi]),
+                                "conditional_severity": float(m[gi]), "definition_id": definition_id}
+                            if getattr(args, "export_outcome_decomposition", False):
+                                decomposition_rows.append(row)
+                            if getattr(args, "export_outcome_distributions", False) and args.severity_mode == "distributional":
+                                distribution_rows.append({**row, "probabilities": pred[gi, 1:].detach().softmax(-1).cpu().tolist(),
+                                    "distribution_kind": "conditional_severity", "support_definition_id": args.outcome_decomposition_definition["severity_distribution"]["definition_sha256"]})
+                elif distributional:
                     pred_loss = distribution_loss(pred, target, args, batch_ipw)
                     mean_loss = mean_mse(pred, target, args, batch_ipw) if signed else mean_bce(pred, target, args, batch_ipw)
                     size = batch_graphs.num_graphs
@@ -2345,6 +2391,7 @@ def run_epoch(
                             "target": float(observed), "prediction": float(prediction),
                             "soft_target": float(soft_target), "execution_branch": int(branch),
                             **({"outcome_domain": "signed_gain"} if signed else {}),
+                            **({"occurrence_probability": float(q[gi]), "conditional_severity": float(m[gi])} if decomposition else {}),
                             **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),
                         })
                 if return_outcome_evaluation:
@@ -2436,7 +2483,7 @@ def run_epoch(
             metrics["mse_loss"] += pred_loss.item() * batch_graphs.num_graphs
 
         if "ce_loss" in metrics:
-            metrics["ce_loss"] += (expected_bce.detach().item() if distributional else pred_loss.item()) * batch_graphs.num_graphs
+            metrics["ce_loss"] += (expected_bce.detach().item() if distributional or decomposition else pred_loss.item()) * batch_graphs.num_graphs
 
         l1_loss = l1_regularizer(model, lambda_l1=args.lambda_l1)
         metrics["l1_loss"] += l1_loss.item() * batch_graphs.num_graphs
@@ -2497,6 +2544,21 @@ def run_epoch(
         }
         if outcome_candidate_x:
             outcome_evaluation["candidate_x"] = np.concatenate(outcome_candidate_x)
+        if decomposition:
+            from models.outcome_decomposition import head_metrics
+            outcome_evaluation.update(occurrence_probability=np.concatenate(decomposition_q),
+                conditional_severity=np.concatenate(decomposition_m),
+                outcome_decomposition_definition=args.outcome_decomposition_definition,
+                decomposition_rows=decomposition_rows)
+            if decomposition_severity_ce:
+                outcome_evaluation.update(severity_ce=np.concatenate(decomposition_severity_ce),
+                    severity_crps=np.concatenate(decomposition_severity_crps), outcome_crps=np.concatenate(decomposition_crps))
+                outcome_evaluation["distribution_rows"] = distribution_rows
+                outcome_evaluation["outcome_distribution_definition"] = args.outcome_decomposition_definition["severity_distribution"]
+            heads = head_metrics(outcome_evaluation["target"], outcome_evaluation["occurrence_probability"],
+                                 outcome_evaluation["conditional_severity"])
+            metrics.update({key: value for key, value in heads.items() if key.startswith(("severity_", "occurrence_"))
+                            and isinstance(value, (float, int)) and key != "occurrence_bce"})
         if distributional:
             outcome_evaluation["outcome_distribution_definition"] = args.outcome_distribution_definition
             outcome_evaluation["distribution_rows"] = distribution_rows

@@ -179,3 +179,4 @@ _vendor/defcon/saved
 !tests/test_empty_windows.py
 
 !tests/test_mixed_outcome_inference.py
+!tests/test_outcome_decomposition.py

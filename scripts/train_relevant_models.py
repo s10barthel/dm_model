@@ -1338,6 +1338,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_pass_height_argument(parser)
     add_feature_selection_arguments(parser)
     args = parser.parse_args(argv)
+    if getattr(args, "severity_mode", None) is not None and getattr(args, "learning_mode", None) != "decomposition":
+        parser.error("--severity-mode requires --learning-mode decomposition.")
     normalize_feature_settings(vars(args))
     supplied = sys.argv[1:] if argv is None else argv
     if args.refit_source_model_id:
@@ -1477,6 +1479,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--target-family is required when outcome models are enabled.")
         if not args.return_type:
             parser.error("--return_type is required when outcome models are enabled.")
+        if getattr(args, "learning_mode", None) == "decomposition" and args.target_family != "xt":
+            parser.error("Decomposition requires absolute xT targets.")
         try:
             args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
             from datatools.stop_conditions import definition
@@ -2084,12 +2088,14 @@ def build_training_commands(
         if "--task" in command and command[command.index("--task") + 1].startswith("outcome_"):
             command.extend(["--stop-condition", getattr(args, "stop_condition", "base")])
             command.extend(["--learning-mode", getattr(args, "learning_mode", None) or "scalar"])
+            if getattr(args, "severity_mode", None) is not None:
+                command.extend(["--severity-mode", args.severity_mode])
             if getattr(args, "distribution_atoms", None) is not None:
                 command.extend(["--distribution-atoms", str(args.distribution_atoms)])
-    if getattr(args, "learning_mode", None) == "distributional":
+    if getattr(args, "learning_mode", None) in {"distributional", "decomposition"}:
         eligible = {"outcome_scoring", "outcome_conceding"}
         if not any(args.enabled_tasks.get(task, False) for task in eligible):
-            raise ValueError("--learning-mode distributional requires an outcome scoring/conceding task.")
+            raise ValueError("Selected learning mode requires an outcome scoring/conceding task.")
     return (
         commands,
         trained_model_ids,

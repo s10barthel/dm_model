@@ -680,7 +680,8 @@ def cached_prediction(cache, predict, scene, model, **kwargs):
            id(scene), tuple(kwargs.get("event_indices") or ()), intent_signature,
            height_signature, auxiliary_signature, repr(sorted(model.args.items())),
            bool(kwargs.get("post_action")), source_signature,
-           bool(kwargs.get("return_model_pass_success")))
+           bool(kwargs.get("return_model_pass_success")),
+           bool(getattr(model, "visualize_outcome_decomposition", False)))
     cached = key in cache
     if not cached:
         cache[key] = predict(scene, model, **kwargs)

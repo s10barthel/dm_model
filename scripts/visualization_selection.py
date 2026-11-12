@@ -171,6 +171,8 @@ def selection_metadata(args):
     if selection is None:
         return {}
     metadata = selection.metadata()
+    if getattr(args, "decomposition", False):
+        metadata["decomposition"] = True
     for group in ("model_pass_success", "pass_height", "physical_xpass"):
         metadata[f"show_{group}"] = group in selection.rendered_components
     return metadata

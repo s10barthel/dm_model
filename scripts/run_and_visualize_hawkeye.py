@@ -106,6 +106,8 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--decomposition", action="store_true", help="Show occurrence x severity below players for individual outcome components.")
+    parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
@@ -206,6 +208,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser, repeatable=True)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
+    from scripts.outcome_decomposition_visualization import validate_options
+    try:
+        validate_options(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     if args.output != "png" and args.time_norm is not None:
@@ -291,6 +298,8 @@ def render_frame_image(
             fontsize=12,
             color="black",
         )
+    from scripts.outcome_decomposition_visualization import annotate as annotate_decomposition
+    annotate_decomposition(ax, snapshot, attacking_prefix, probs)
     add_overlay_annotations(
         ax,
         snapshot,
@@ -669,6 +678,8 @@ def main() -> None:
     model_specs = ComponentModels({name: load_model(model_id, device) for name, model_id in selected_model_ids.items()} )
     from models.outcome_learning import configure_distribution_exports
     configure_distribution_exports(model_specs, getattr(args, "export_outcome_distributions", False))
+    from models.outcome_decomposition import configure_exports
+    configure_exports(model_specs, getattr(args, "export_outcome_decomposition", False))
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
@@ -689,6 +700,8 @@ def main() -> None:
     selected_physical_xpass_metric = physical_xpass_metric(args)
     component_selection = finish_inference_selection(
         args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
+    from scripts.outcome_decomposition_visualization import validate_models
+    validate_models(args, component_selection.rendered_components, model_specs)
     pass_success_model = model_specs.get("pass_success")
     pass_success_runtime = configure_xpass_runtime(args, model_specs, physical_cache_dir)
     graph_schema = validate_model_graph_schemas(model_specs)
@@ -856,6 +869,8 @@ def main() -> None:
     metadata.update(selection_metadata(args))
     from models.outcome_learning import write_distribution_exports
     metadata["outcome_distribution_exports"] = write_distribution_exports(output_root, model_specs)
+    from models.outcome_decomposition import write_exports
+    metadata["outcome_decomposition_exports"] = write_exports(output_root, model_specs)
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_runtime is not None and (
         model_uses_physical_xpass(pass_success_runtime.args) or inference_uses_physical_xpass(pass_success_runtime.args)

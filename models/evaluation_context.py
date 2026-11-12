@@ -32,6 +32,8 @@ def binary_goal_return(value):
 
 
 def add_evaluation_arguments(parser):
+    parser.add_argument("--export-outcome-decomposition", action="store_true",
+                        help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true",
                         help="Export observed outcome categorical probabilities beside evaluation artifacts.")
     parser.add_argument("--filter", dest="evaluation_filter", choices=("pass",), default=None,

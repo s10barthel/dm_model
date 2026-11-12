@@ -1050,7 +1050,9 @@ def main(cache_session):
 
     # Load model
     args_dict = dict(vars(args))
-    deferred_distribution = is_distributional(args) and not getattr(args, "outcome_distribution_definition", None)
+    from models.outcome_decomposition import is_decomposition, fit_definition as fit_decomposition
+    deferred_decomposition = is_decomposition(args) and not getattr(args, "outcome_decomposition_definition", None)
+    deferred_distribution = (is_distributional(args) and not getattr(args, "outcome_distribution_definition", None)) or deferred_decomposition
     model = None if deferred_distribution else GNN(args_dict).to(device)
     if model is not None and str(device).startswith("cuda") and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
@@ -1312,13 +1314,16 @@ def main(cache_session):
 
     if deferred_distribution:
         batches = (train_dataset.iter_label_batches() if disk_args else [train_dataset.labels])
-        args.outcome_distribution_definition = fit_definition(batches, args, {
+        definition_key = "outcome_decomposition_definition" if deferred_decomposition else "outcome_distribution_definition"
+        fitter = fit_decomposition if deferred_decomposition else fit_definition
+        fitted_definition = fitter(batches, vars(args), {
             "training_match_ids": list(map(str, train_match_ids)),
             "source_identity": source_identity, "target_family": args.target_family,
             "return_type": args.return_type,
             "xt_target_definition": getattr(args, "xt_target_definition", None),
             "stop_condition_definition": getattr(args, "stop_condition_definition", None),
         })
+        setattr(args, definition_key, fitted_definition)
         args_dict.update(distribution_identity(args))
         model = GNN(args_dict).to(device)
         if str(device).startswith("cuda") and torch.cuda.device_count() > 1:

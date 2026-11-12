@@ -516,6 +516,20 @@ def write_outcome_evaluation_artifacts(
                 bin_frames.append(binned)
             metric_rows.append(row)
 
+    if "occurrence_probability" in outcome_evaluation:
+        from models.outcome_decomposition import head_metrics
+        reports = {}
+        for name, mask in strata:
+            extras = {key: np.asarray(outcome_evaluation[key])[mask]
+                      for key in ("severity_ce", "severity_crps", "outcome_crps") if key in outcome_evaluation}
+            reports[name] = head_metrics(targets[mask],
+                np.asarray(outcome_evaluation["occurrence_probability"])[mask],
+                np.asarray(outcome_evaluation["conditional_severity"])[mask], **extras)
+        (output_dir / "outcome_decomposition_metrics.json").write_text(json.dumps(reports, indent=2, allow_nan=False), encoding="utf-8")
+        (output_dir / "outcome_decomposition_definition.json").write_text(
+            json.dumps(outcome_evaluation["outcome_decomposition_definition"], indent=2), encoding="utf-8")
+        if outcome_evaluation.get("decomposition_rows"):
+            pd.DataFrame(outcome_evaluation["decomposition_rows"]).to_parquet(output_dir / "outcome_decomposition.parquet", index=False)
     metrics = pd.DataFrame(metric_rows)
     metrics.attrs["outcome_bootstrap"] = bootstrap_metadata
     metrics.to_csv(output_dir / "outcome_metrics.csv", index=False)
@@ -857,12 +871,18 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    from models.outcome_decomposition import is_decomposition
+    model_args.export_outcome_decomposition = args.export_outcome_decomposition
+    if args.export_outcome_decomposition and args.learning_curve_rows and not args.comparison_rows:
+        parser.error("--export-outcome-decomposition with --learning-curve-rows requires --comparison-rows")
+    if args.export_outcome_decomposition and (not is_decomposition(model_args) or not args.evaluation_output_dir):
+        parser.error("--export-outcome-decomposition requires a decomposition outcome checkpoint and --evaluation-output-dir")
     model_args.export_outcome_distributions = args.export_outcome_distributions
     if args.export_outcome_distributions:
         from models.outcome_learning import is_distributional
         if model_args.task not in {"outcome_scoring", "outcome_conceding"} or not args.evaluation_output_dir:
             parser.error("--export-outcome-distributions requires an outcome checkpoint and --evaluation-output-dir")
-        model_args.export_outcome_distributions = is_distributional(model_args)
+        model_args.export_outcome_distributions = is_distributional(model_args) or (is_decomposition(model_args) and model_args.severity_mode == "distributional")
         if args.learning_curve_rows and not args.comparison_rows:
             parser.error("Distribution exports with --learning-curve-rows also require --comparison-rows")
     model_args.graph_validation = args.graph_validation
@@ -997,7 +1017,7 @@ def main():
                          f"(filter={args.evaluation_filter!r}, min_pass_duration={model_args.min_pass_dur}): "
                          f"{test_dataset.selection_counts}.")
     validate_test_dataset_dimensions(test_dataset, model_args)
-    if (args.comparison_rows or args.export_outcome_distributions) and model_args.gnn_task in {"node_selection", "node_binary"}:
+    if (args.comparison_rows or args.export_outcome_distributions or args.export_outcome_decomposition) and model_args.gnn_task in {"node_selection", "node_binary"}:
         ensure_dataset_node_identities(test_dataset, feature_root, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
