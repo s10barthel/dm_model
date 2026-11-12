@@ -607,6 +607,7 @@ def test_default_saved_run_renders_inherited_physical_cache(tmp_path, monkeypatc
 
 
 def test_default_inference_comparison_shares_model_and_final_inference(tmp_path, monkeypatch, inference_fixture):
+    monkeypatch.setattr("builtins.input", lambda *a: "yes")
     _, _, calls, _ = inference_fixture
     previous = dv.inference_gnn
     def predict(scene, model, **kwargs):

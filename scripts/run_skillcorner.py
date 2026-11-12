@@ -36,6 +36,11 @@ from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
 from scripts.comparison_warnings import add_warning_argument
+from scripts.inference_components import (
+    COMPONENT_MODEL_TASKS, confirm_component_selection, configure_xpass_runtime,
+    validate_component_dependencies, runtime_uses_xpass, runtime_kwargs,
+    require_sportec_feature_context,
+)
 from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -254,18 +259,14 @@ def main() -> None:
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
         warning_collector=outcome_warnings,
-        required_tasks=[
-            "action_intent",
-            "pass_intent",
-            "pass_success",
-            "outcome_scoring",
-            "outcome_conceding",
-        ],
+        required_tasks=[],
+        optional_tasks=list(COMPONENT_MODEL_TASKS),
         bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
+            "pass_height": getattr(args, "pass_height_model_id", None),
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
@@ -275,6 +276,7 @@ def main() -> None:
         require_target_family=False,
         require_shared_split=False,
     )
+    validate_component_dependencies(args, resolved_model_ids)
     pass_height_model_id = resolve_optional_model_id("pass_height", getattr(args, "pass_height_model_id", None), bundle)
     if pass_height_model_id:
         resolved_model_ids["pass_height"] = pass_height_model_id
@@ -283,6 +285,7 @@ def main() -> None:
     output_parent = Path(args.output_dir) if args.output_dir else SKILLCORNER_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
     start_inference_attempt(output_dir, args)
+    model_selection = confirm_component_selection(resolved_model_ids, args, output_dir)
     confirm_outcome_warnings(outcome_warnings, output_dir, shared_context)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -295,12 +298,12 @@ def main() -> None:
     skipped_matches.setdefault("processing_error", [])
 
     model_specs = load_skillcorner_models(
-        action_intent_model_id=resolved_model_ids["action_intent"],
-        pass_intent_model_id=resolved_model_ids["pass_intent"],
-        pass_success_model_id=resolved_model_ids["pass_success"],
+        action_intent_model_id=resolved_model_ids.get("action_intent"),
+        pass_intent_model_id=resolved_model_ids.get("pass_intent"),
+        pass_success_model_id=resolved_model_ids.get("pass_success"),
         pass_height_model_id=resolved_model_ids.get("pass_height"),
-        outcome_scoring_model_id=resolved_model_ids["outcome_scoring"],
-        outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],
+        outcome_scoring_model_id=resolved_model_ids.get("outcome_scoring"),
+        outcome_conceding_model_id=resolved_model_ids.get("outcome_conceding"),
         device=device,
     )
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
@@ -315,35 +318,12 @@ def main() -> None:
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
     pass_success_model = model_specs.get("pass_success")
-    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
-        pass_success_model.args["inference_use_physical_xpass"] = True
-        pass_success_model.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
-        pass_success_model.args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
-        pass_success_model.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
-        if getattr(args, "v4_power", None) is not None:
-            pass_success_model.args["v4_power"] = float(args.v4_power)
-        if getattr(args, "v4_zero", None) is not None:
-            pass_success_model.args["v4_zero"] = float(args.v4_zero)
-        pass_success_model.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
-        pass_success_model.args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
-        pass_success_model.args["v5_discount"] = bool(getattr(args, "v5_discount", True))
-        if getattr(args, "pass_height_threshold", None) is not None:
-            pass_success_model.args["pass_height_threshold"] = args.pass_height_threshold
-        pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
-    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
-        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
-        pass_success_model.args["physical_runtime_cache_refresh"] = False
-        pass_success_model.args["physical_num_workers"] = physical_num_workers
-        pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
-        pass_success_model.args["physical_batch_size"] = physical_batch_size
-        pass_success_model.args["physical_runtime_cache_read_only"] = True
-        if not no_physical_cache:
-            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    pass_success_runtime = configure_xpass_runtime(args, model_specs, physical_cache_dir)
     configure_auxiliary_models(args, model_specs, device)
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("skillcorner", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
-    validate_pc_xpass_startup(model_specs.get("pass_success"))
+    validate_pc_xpass_startup(pass_success_runtime)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     stats_by_match: dict[str, dict[str, int]] = {}
@@ -448,7 +428,7 @@ def main() -> None:
                         )
                     )
 
-            if refresh_physical_cache and built_possessions and _pass_success_uses_physical_xpass(model_specs):
+            if refresh_physical_cache and built_possessions and runtime_uses_xpass(pass_success_runtime):
                 print("  WARN --refresh-physical-cache is ignored during inference; run scripts/generate_physical_xpass.py to fill runtime caches.")
 
             with tqdm(
@@ -467,7 +447,7 @@ def main() -> None:
                                 event_index,
                             )
                         )
-                        components = infer_skillcorner_components(possession, model_specs, device=device)
+                        components = infer_skillcorner_components(possession, model_specs, device=device, **runtime_kwargs(model_specs, pass_success_runtime))
                         runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
                         if runtime_physical_stats:
                             physical_xpass_runtime_stats.setdefault(str(match_id), {})[str(event_index)] = runtime_physical_stats
@@ -524,7 +504,7 @@ def main() -> None:
             print(f"  SKIP match {match_id}: {summarize_exception(exc)}")
 
     summary = summarize_skillcorner_stats(stats_by_match, skipped_matches)
-    physical_xpass_required = _pass_success_uses_physical_xpass(model_specs)
+    physical_xpass_required = runtime_uses_xpass(pass_success_runtime)
     physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
         physical_xpass_required=physical_xpass_required,
         cache_disabled=no_physical_cache,
@@ -535,11 +515,12 @@ def main() -> None:
         skipped_stats=physical_xpass_skipped_actions,
     )
     physical_lookup_config = (
-        physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)
-        if pass_success_model is not None
+        physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)
+        if pass_success_runtime is not None
         else {}
     )
     metadata = {
+        "model_selection": model_selection,
         **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
@@ -574,7 +555,7 @@ def main() -> None:
         "physical_xpass_v4_discount": physical_lookup_config.get("v4_discount") if physical_lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v5_intent_threshold": physical_lookup_config.get("v5_intent_threshold") if physical_lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_v5_discount": physical_lookup_config.get("v5_discount") if physical_lookup_config.get("weight_version") == "v5" else None,
-        "physical_xpass_pass_intent_model_id": resolved_model_ids["pass_intent"] if physical_lookup_config.get("weight_version") == "v5" else None,
+        "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if physical_lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_lookup_config.get("ball_z_limit"),
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
@@ -603,7 +584,7 @@ def main() -> None:
     }
     if not processed_matches:
         raise RuntimeError("No usable SkillCorner matches were processed.")
-    metadata.update(model_pass_success_metadata())
+    metadata.update(model_pass_success_metadata(available=pass_success_model is not None))
     attach_membership_report(metadata, "skillcorner")
     metadata.update(finalize_pc_xpass_attempt())
     write_run_metadata(output_dir, metadata)

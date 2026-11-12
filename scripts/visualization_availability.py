@@ -8,15 +8,21 @@ from scripts.visualization_selection import (
 
 
 def select_inference_components(args, model_ids, *, include_success_intent=False):
+    from scripts.inference_components import uses_cached_v0, validate_component_dependencies
     selection = resolve_component_selection(args, include_success_intent=include_success_intent)
+    if "pass_success" in selection.required_component_groups:
+        validate_component_dependencies(args, model_ids)
     available = available_model_components(model_ids) | {"physical_xpass"}
+    if uses_cached_v0(args):
+        available.add("pass_success")
     args._available_component_inputs = available
     reasons = {component: f"missing {task} checkpoint"
                for task in MODEL_TASKS if not model_ids.get(task)
                for component in GROUP_TO_COMPONENTS[task]}
     if not model_ids.get("pass_success"):
         reasons["model_pass_success"] = "missing pass_success checkpoint"
-    return bind_component_selection(args, filter_component_selection(selection, available, reasons=reasons), report=False)
+    return bind_component_selection(args, filter_component_selection(selection, available, reasons=reasons,
+        allow_empty=True, allow_unavailable_explicit=True), report=False)
 
 
 def finish_inference_selection(args, cache_dir, metric, version):
@@ -44,16 +50,25 @@ def finish_inference_selection(args, cache_dir, metric, version):
             except PhysicalXpassMetricUnavailable as exc:
                 available.discard("physical_xpass")
                 reasons["physical_xpass"] = str(exc)
-    return bind_component_selection(args, filter_component_selection(selection, available, reasons=reasons))
+    return bind_component_selection(args, filter_component_selection(selection, available, reasons=reasons,
+        allow_unavailable_explicit=True))
 
 
 def saved_component_inputs(raw, metadata=None):
     """Inspect source data before dataset adapters synthesize empty placeholders."""
     if raw is None:
         return set()
-    if isinstance(raw, dict):
-        return {name for name, table in raw.items() if table is not None and not table.empty}
     metadata = metadata or {}
+    configured = metadata.get("model_selection", {}).get("availability", {}).get("available", {})
+    if isinstance(raw, dict):
+        available = {name for name, table in raw.items() if table is not None and not table.empty}
+        for name in list(available):
+            task = next((task for task in ("outcome_scoring", "outcome_conceding") if name.startswith(task)), name)
+            if configured.get(task) is False:
+                available.discard(name)
+        if metadata.get("model_pass_success_available") is False:
+            available.discard("model_pass_success")
+        return available
     models = metadata.get("models", {}) or {}
     available = set()
     for group, components in GROUP_TO_COMPONENTS.items():

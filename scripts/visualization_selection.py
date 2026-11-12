@@ -136,7 +136,8 @@ def available_model_components(model_ids):
     return available
 
 
-def filter_component_selection(selection, available, *, reasons=None, context="Selected source", allow_empty=False):
+def filter_component_selection(selection, available, *, reasons=None, context="Selected source", allow_empty=False,
+                               allow_unavailable_explicit=False):
     """Filter defaults, but require every explicitly included output's inputs."""
     available = set(available)
     reasons = reasons or {}
@@ -146,7 +147,7 @@ def filter_component_selection(selection, available, *, reasons=None, context="S
         missing = sorted({leaf for c in components for leaf in source_inputs(c)} - available)
         if missing:
             reason = "; ".join(reasons.get(leaf, f"missing {leaf} inputs") for leaf in missing)
-            if group in selection.explicit_component_groups:
+            if group in selection.explicit_component_groups and not allow_unavailable_explicit:
                 raise ValueError(f"{context}: {group} visualization unavailable: {reason}.")
             skipped[group] = f"{context}: {reason}"
         else:

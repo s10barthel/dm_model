@@ -30,6 +30,10 @@ from scripts.visualization_comparison import (
 )
 from scripts.comparison_warnings import ComparisonWarnings, metadata_differences
 from scripts.visualization_carries import carry_visualization_warnings
+from scripts.inference_components import (
+    ComponentModels, uses_cached_v0, configure_xpass_runtime, confirm_visualization_selection,
+    require_sportec_feature_context,
+)
 from scripts.visualization_availability import select_inference_components, finish_inference_selection
 from scripts.visualization_selection import selection_metadata
 
@@ -73,7 +77,8 @@ def resolve_variants(args, mod, sportec, warning_collector=None):
                          "Repeat --outcome-scoring-model-id and --outcome-conceding-model-id equally, "
                          "including repeating a fixed counterpart explicitly for each pair.")
     selection = select_inference_components(args, available_ids, include_success_intent=sportec)
-    required = [task for task in selection.required_component_groups if task in MODEL_TASKS]
+    required = [task for task in selection.required_component_groups if task in MODEL_TASKS
+                and (task != "pass_success" or available_ids.get(task) or not uses_cached_v0(args))]
     if args.visualization_comparison in {"masks", "checkpoints"} and not required:
         raise ValueError("Checkpoint/mask comparisons require at least one model-backed selected output.")
     if (getattr(args, "comparison_dimension", None) == "weight"
@@ -119,11 +124,13 @@ def resolve_variants(args, mod, sportec, warning_collector=None):
         for entry in resolve_inference_mask_configurations(args):
             number = entry["id"].split("_")[-1]
             specifications.append((entry["id"], f"mask-{number}: " + ", ".join(entry["masks"]), base, entry["masks"]))
+    args._component_model_selection = confirm_visualization_selection(available_ids, args,
+        getattr(args, "_comparison_output_root", Path(args.output_dir)), include_success_intent=sportec)
     models, records, contexts, variants = {}, {}, [], []
     shared_auxiliaries = None
     for identifier, label, ids, masks in specifications:
         pipeline_records = {}
-        pipeline_models = {}
+        pipeline_models = ComponentModels()
         for task, model_id in ids.items():
             if model_id.split("/", 1)[0] != task:
                 raise ValueError(f"Checkpoint {model_id!r} does not match task {task!r}.")
@@ -198,30 +205,10 @@ def configure_physical(args, mod, variants, dataset):
                                          else mod.get_runtime_physical_xpass_dir(dataset))
     args._explicit_physical_cache = bool(args.physical_cache_dir or args.pc_xpass_id)
     args.physical_cache_dir = cache
-    seen = set()
     for variant in variants:
         lane_cache = mod.pc_versions.lane_cache_dir(dataset, args, variant.models)
         mod.configure_lane_survival_runtime_cache(variant.models, lane_cache)
-        model = variant.models.get("pass_success")
-        if model is None or id(model) in seen:
-            continue
-        seen.add(id(model))
-        if args.use_physical_xpass:
-            model.args.update(inference_use_physical_xpass=True, pc_xpass=bool(args.pc_xpass),
-                              x_pass_version=args.x_pass_version, xpass_weight=args.xpass_weight,
-                              v4_discount=args.v4_discount, v5_intent_threshold=args.v5_intent_threshold,
-                              v5_discount=args.v5_discount, ball_z_limit=args.ball_z_limit)
-            for key in ("v4_power", "v4_zero", "pass_height_threshold"):
-                if getattr(args, key, None) is not None:
-                    model.args[key] = getattr(args, key)
-        if mod.model_uses_physical_xpass(model.args) or mod.inference_uses_physical_xpass(model.args):
-            model.args.update(physical_runtime_cache_disabled=args.no_physical_cache,
-                physical_runtime_cache_refresh=False, physical_runtime_cache_read_only=True,
-                physical_num_workers=args.physical_num_workers,
-                physical_worker_thread_limit=args.physical_worker_thread_limit,
-                physical_batch_size=args.physical_batch_size)
-            if not args.no_physical_cache:
-                model.args["physical_cache_dir"] = cache
+        configure_xpass_runtime(args, variant.models, cache)
 
 
 def configure_cache_variants(args, mod, variants, dataset):
@@ -398,9 +385,11 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
 
 def sportec_groups(args, mod, variants, selection, shared, bundle, schema, device, *, deferred=False, warning_collector=None):
     feature_run_id = args.feature_run_id
-    if not feature_run_id and not selection.required_component_groups and variants[0].provenance.get("physical_cache_dir"):
-        info = mod.pc_versions.read_metadata(variants[0].provenance["physical_cache_dir"])
+    cache = variants[0].provenance.get("physical_cache_dir") or args.physical_cache_dir
+    if not feature_run_id and (not variants[0].models or uses_cached_v0(args)) and cache:
+        info = mod.pc_versions.read_metadata(cache)
         feature_run_id = (info.get("source_inputs") or {}).get("feature_run_id")
+    require_sportec_feature_context(args, shared, bundle, cache_selected=bool(feature_run_id))
     runtime = mod.resolve_runtime_feature_run_context(feature_run_id, shared, bundle, args.intended_receiver_mode,
                                                      schema, context="Selected comparison visualization feature artifacts",
                                                      warning_collector=warning_collector)
@@ -472,6 +461,7 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
 def run_comparison(args, mod):
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id("visualization_comparison"))
     start_inference_attempt(root, args)
+    args._comparison_output_root = root
     sportec = Path(mod.__file__).stem == "visualize_action_components"
     dataset = "sportec" if sportec else "hawkeye"
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -486,7 +476,7 @@ def run_comparison(args, mod):
     # Validate all scopes/schemas before any expensive inference or artifact output.
     for variant in variants:
         with active_variant(variant, "preflight"):
-            validate_pc_xpass_startup(variant.models.get("pass_success"))
+            validate_pc_xpass_startup(variant.models.get("pass_success", getattr(variant.models, "xpass_runtime", None)))
     names = list(selection.rendered_components)
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.policy = policy
@@ -494,6 +484,7 @@ def run_comparison(args, mod):
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
     report.metadata.update(selection_metadata(args))
+    report.metadata["model_selection"] = getattr(args, "_component_model_selection", {})
     if args.visualization_comparison == "pc_xpass":
         report.metadata["comparison_dimension"] = getattr(args, "comparison_dimension", None) or "cache_id"
     if "physical_xpass" in names and args.visualization_comparison != "pc_xpass":

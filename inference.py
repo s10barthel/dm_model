@@ -1091,7 +1091,7 @@ def _prediction_node_ids(match, graph, label, policy, post_action=False, teammat
 
 
 @blending_stage("cache_prediction")
-def inference_xpass_v0(match, model, *, graphs, labels):
+def inference_xpass_v0(match, model, *, graphs, labels, event_indices=None):
     """Copy cached xPass without a learned checkpoint; model holds runtime args only.
 
     Use the same cache acceptance, attachment and coverage policy as GNN blending.
@@ -1099,6 +1099,13 @@ def inference_xpass_v0(match, model, *, graphs, labels):
     """
     if not inference_uses_physical_xpass(model.args) or physical_xpass_weight_version(model.args) != "v0":
         raise ValueError("Checkpoint-free xPass requires active --xpass-weight v0.")
+    selected = set(event_indices) if event_indices is not None else None
+    positions = [i for i, (graph, label) in enumerate(zip(graphs, labels))
+                 if graph is not None and (selected is None or int(label[config.LABEL_INDEX["action_index"]]) in selected)
+                 and (bool(label[config.LABEL_INDEX["is_pass"]]) or bool(label[config.LABEL_INDEX["is_dribble"]]))]
+    graphs, labels = [graphs[i] for i in positions], labels[positions]
+    if not graphs:
+        return pd.DataFrame()
     preflight_pc_xpass(match, model, graph_override=graphs, label_override=labels)
     graphs = [graph.clone() for graph in graphs]
     graphs, labels = filter_missing_physical_xpass_rows_for_inference(match, graphs, labels, model)

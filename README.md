@@ -816,6 +816,11 @@ python scripts/visualize_skillcorner.py --match-id <match_id> --index 1 --compon
 
 ### 8. Run frame-level inference on HawkEye data
 
+All dataset component runners support optional model IDs and checkpoint-free
+PC xPass v0, with explicit confirmation of omissions and unavailable derived
+metrics. See [Optional component inference](docs/optional_component_inference.md)
+for the shared rules, data selection, and EPV examples.
+
 ```powershell
 python scripts/run_hawkeye.py --bundle-id <bundle_id>
 python scripts/run_hawkeye.py --bundle-id <bundle_id> --time-norm 0 --time-norm 1

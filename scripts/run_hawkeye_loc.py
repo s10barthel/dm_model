@@ -47,6 +47,10 @@ from models.utils import (
 )
 from models.membership import attach_membership_report
 from scripts.comparison_warnings import add_warning_argument
+from scripts.inference_components import (
+    COMPONENT_MODEL_TASKS, confirm_component_selection, configure_xpass_runtime,
+    validate_component_dependencies, runtime_kwargs,
+)
 from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
@@ -597,15 +601,19 @@ def _geometry_warning_record(row: pd.Series, frame: dict[str, float | int], geom
     }
 
 
-def _configure_models(args: argparse.Namespace, warning_collector=None, warning_root=None):
+def _resolve_location_models(args: argparse.Namespace, warning_collector=None, warning_root=None):
+    args.use_physical_xpass = True
+    args.pc_xpass = True
     resolved_ids, shared_context, bundle = resolve_model_selection(
         warning_collector=warning_collector,
-        required_tasks=["action_intent", "pass_intent", "pass_success", "outcome_scoring", "outcome_conceding"],
+        required_tasks=[],
+        optional_tasks=list(COMPONENT_MODEL_TASKS),
         bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
+            "pass_height": getattr(args, "pass_height_model_id", None),
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
@@ -615,47 +623,33 @@ def _configure_models(args: argparse.Namespace, warning_collector=None, warning_
         require_target_family=False,
         require_shared_split=False,
     )
+    validate_component_dependencies(args, resolved_ids)
+    if warning_root is not None:
+        args._model_selection = confirm_component_selection(resolved_ids, args, warning_root)
     if warning_collector is not None and warning_root is not None:
         confirm_outcome_warnings(warning_collector, warning_root, shared_context)
     pass_height_id = resolve_optional_model_id("pass_height", args.pass_height_model_id, bundle)
     if pass_height_id:
         resolved_ids["pass_height"] = pass_height_id
+    return resolved_ids, shared_context, bundle
+
+
+def _configure_models(args: argparse.Namespace, warning_collector=None, warning_root=None):
+    selected = getattr(args, "_confirmed_model_selection", None)
+    if selected is None:
+        selected = _resolve_location_models(args, warning_collector, warning_root)
+    resolved_ids, shared_context, bundle = selected
     device = args.device if torch.cuda.is_available() else "cpu"
     specs = load_hawkeye_models(
-        action_intent_model_id=resolved_ids["action_intent"],
-        pass_intent_model_id=resolved_ids["pass_intent"],
-        pass_success_model_id=resolved_ids["pass_success"],
+        action_intent_model_id=resolved_ids.get("action_intent"),
+        pass_intent_model_id=resolved_ids.get("pass_intent"),
+        pass_success_model_id=resolved_ids.get("pass_success"),
         pass_height_model_id=resolved_ids.get("pass_height"),
-        outcome_scoring_model_id=resolved_ids["outcome_scoring"],
-        outcome_conceding_model_id=resolved_ids["outcome_conceding"],
+        outcome_scoring_model_id=resolved_ids.get("outcome_scoring"),
+        outcome_conceding_model_id=resolved_ids.get("outcome_conceding"),
         device=device,
     )
-    pass_model = specs["pass_success"]
-    pass_model.args.update(
-        {
-            "inference_use_physical_xpass": True,
-            "pc_xpass": True,
-            "x_pass_version": args.x_pass_version,
-            "xpass_weight": args.xpass_weight,
-            "v4_discount": bool(args.v4_discount),
-            "v5_intent_threshold": float(args.v5_intent_threshold),
-            "v5_discount": bool(args.v5_discount),
-            "ball_z_limit": args.ball_z_limit,
-            "physical_runtime_cache_disabled": False,
-            "physical_runtime_cache_refresh": False,
-            "physical_runtime_cache_read_only": True,
-            "physical_cache_dir": str(args.pc_xpass_cache_dir),
-            "physical_num_workers": args.num_workers,
-            "physical_worker_thread_limit": int(args.worker_thread_limit),
-            "physical_batch_size": int(args.physical_batch_size),
-        }
-    )
-    if args.v4_power is not None:
-        pass_model.args["v4_power"] = float(args.v4_power)
-    if args.v4_zero is not None:
-        pass_model.args["v4_zero"] = float(args.v4_zero)
-    if getattr(args, "pass_height_threshold", None) is not None:
-        pass_model.args["pass_height_threshold"] = args.pass_height_threshold
+    configure_xpass_runtime(args, specs, args.pc_xpass_cache_dir)
     configure_auxiliary_models(args, specs, device, active=True)
     configure_inference_masks(specs, getattr(args, "inference_mask", None))
     schema = validate_model_graph_schemas(specs)
@@ -794,6 +788,8 @@ def main() -> None:
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
         raise FileExistsError(f"Component run directory already exists; use --overwrite: {output_dir}")
     start_inference_attempt(output_dir, args, required=True)
+    args._outcome_warnings = outcome_warning_policy(args)
+    args._confirmed_model_selection = _resolve_location_models(args, args._outcome_warnings, output_dir)
     with cli_blending_guard(args, required=True):
         pc_versions.start_generation(args, location=True)
     try:
@@ -807,7 +803,7 @@ def main() -> None:
 
 
 def _run_location(args: argparse.Namespace) -> None:
-    outcome_warnings = outcome_warning_policy(args)
+    outcome_warnings = getattr(args, "_outcome_warnings", None) or outcome_warning_policy(args)
     invocation_metadata = build_invocation_metadata(args)
     input_path = Path(args.input_file)
     if not input_path.exists():
@@ -833,10 +829,10 @@ def _run_location(args: argparse.Namespace) -> None:
     output_dir = output_parent / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
-    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     resolved_ids, shared_context, model_specs, graph_schema, device = _configure_models(
         args, warning_collector=outcome_warnings, warning_root=output_dir)
+    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     model_warning_records = compatibility_warnings(resolved_ids, model_specs)
 
     exports: list[pd.DataFrame] = []
@@ -918,7 +914,7 @@ def _run_location(args: argparse.Namespace) -> None:
         was_missing = False
         try:
             unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
-            with blending_guard(model_specs["pass_success"], "state_validation", unit["situation"], selection_row_id=row_id):
+            with blending_guard(args._xpass_runtime, "state_validation", unit["situation"], selection_row_id=row_id):
                 stats = prewarm_runtime_items(
                     unit["cache_items"],
                     cache_dir=cache_dir,
@@ -954,7 +950,7 @@ def _run_location(args: argparse.Namespace) -> None:
             missing_records.append(_missing_record(row, "pc_xpass_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: pc-xPass audit/retry failed: {type(exc).__name__}: {exc}")
 
-    validate_pc_xpass_startup(model_specs["pass_success"])
+    validate_pc_xpass_startup(args._xpass_runtime)
     # Phase 3: rebuild each graph and infer sequentially from read-only caches.
     for row in cache_ready_rows:
         row_id = int(row["selection_row_id"])
@@ -964,7 +960,7 @@ def _run_location(args: argparse.Namespace) -> None:
             attacking_rows = unit["attacking_rows"]
             situation.pc_xpass_coverage_players = set(attacking_rows.loc[
                 pd.to_numeric(attacking_rows.uefa_player_id, errors="coerce").eq(int(unit["selected_player"])), "object_id"].astype(str))
-            components = infer_hawkeye_components(situation, model_specs, device=device)
+            components = infer_hawkeye_components(situation, model_specs, device=device, **runtime_kwargs(model_specs, args._xpass_runtime))
             export = build_hawkeye_export(attacking_rows, situation, components)
             selected_export = export.loc[
                 pd.to_numeric(export["uefa_player_id"], errors="coerce").eq(int(unit["selected_player"]))
@@ -975,7 +971,11 @@ def _run_location(args: argparse.Namespace) -> None:
                     f"found {len(selected_export)}"
                 )
             missing_components = [column for column in REQUIRED_SCORE_COMPONENTS if pd.isna(selected_export.iloc[0][column])]
-            unrelated_missing = [name for name in missing_components if name not in {"pass_success", "pass_score", "epv"}]
+            expected = {"action_intent", "pass_intent"} & set(resolved_ids)
+            for task in ("outcome_scoring", "outcome_conceding"):
+                if task in resolved_ids:
+                    expected.update({task + "_success", task + "_failure"})
+            unrelated_missing = [name for name in missing_components if name in expected]
             if unrelated_missing:
                 raise RuntimeError("selected-player component values are missing: " + ", ".join(unrelated_missing))
             frame = unit["frame"]
@@ -1026,6 +1026,7 @@ def _run_location(args: argparse.Namespace) -> None:
 
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_ids.items()}
     metadata = {
+        "model_selection": getattr(args, "_model_selection", {}),
         **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "run_id": run_id,
@@ -1071,7 +1072,7 @@ def _run_location(args: argparse.Namespace) -> None:
         "shared_model_context": shared_context,
         "status": "completed" if missing_report.empty else "completed_with_errors",
     }
-    metadata.update(model_pass_success_metadata())
+    metadata.update(model_pass_success_metadata(available="pass_success" in model_specs))
     attach_membership_report(metadata, "hawkeye",
                              identities=[(str(value), None) for value in hawkeye_table["loc_situation_id"].unique()])
     metadata.update(finalize_pc_xpass_attempt())

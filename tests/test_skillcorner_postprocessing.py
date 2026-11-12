@@ -328,6 +328,7 @@ def test_run_skillcorner_main_prints_match_centered_progress(
     }
 
     monkeypatch.setattr(run_skillcorner, "parse_args", lambda: args)
+    monkeypatch.setattr("builtins.input", lambda *a: "yes")
     monkeypatch.setattr(run_skillcorner.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(run_skillcorner, "resolve_model_selection", lambda **kwargs: (model_ids, shared_context, None))
     monkeypatch.setattr(run_skillcorner, "discover_skillcorner_matches", lambda *args, **kwargs: (["m1", "m2"], {}))
@@ -346,7 +347,7 @@ def test_run_skillcorner_main_prints_match_centered_progress(
 
     def fake_build_skillcorner_possession(context, event_index, **kwargs):
         match_id = "m1" if event_index in {10, 20} else "m2"
-        possession = SimpleNamespace(physical_xpass_runtime_stats=None)
+        possession = SimpleNamespace(physical_xpass_runtime_stats=None, graph_features_0=[], labels=None)
         return possession, possession_stats[(match_id, int(event_index))]
 
     monkeypatch.setattr(run_skillcorner, "build_skillcorner_possession", fake_build_skillcorner_possession)

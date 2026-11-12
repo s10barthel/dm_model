@@ -10,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from datatools.component_inference import infer_components, load_component_models
 import torch
 from kloppy import skillcorner as kloppy_skillcorner
 from torch_geometric.data import Data
@@ -689,62 +690,11 @@ def infer_skillcorner_components(
     possession: SkillcornerPossession,
     model_specs: dict[str, Any],
     device: str = "cpu",
+    *,
+    xpass_runtime=None,
 ) -> dict[str, pd.DataFrame]:
-    components: dict[str, pd.DataFrame] = {}
-    if possession.labels.numel() == 0 or not possession.graph_features_0:
-        return components
-
-    preflight_pc_xpass(possession, model_specs["pass_success"], graph_override=possession.graph_features_0, label_override=possession.labels)
-
-    state_inputs = {"graph_override": possession.graph_features_0, "label_override": possession.labels}
-    precomputed_auxiliaries = {}
-    action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False, **state_inputs)
-    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False,
-                                   precomputed_auxiliaries=precomputed_auxiliaries, **state_inputs)
-    if "pass_height" in model_specs:
-        pass_height, _ = inference_gnn(possession, model_specs["pass_height"], device=device, post_action=False,
-                                       precomputed_auxiliaries=precomputed_auxiliaries, **state_inputs)
-    else:
-        pass_height = pd.DataFrame()
-    try:
-        pass_success, model_pass_success = inference_gnn(
-            possession,
-            model_specs["pass_success"],
-            device=device,
-            post_action=False,
-            return_model_pass_success=True,
-            **state_inputs,
-            pass_intent_probs=pass_intent,
-            precomputed_auxiliaries=precomputed_auxiliaries,
-        )
-    except PhysicalXPassNoUsableRowsError:
-        pass_success = pd.DataFrame()
-        model_pass_success = pd.DataFrame()
-    scoring_failure, scoring_success = inference_gnn(
-        possession,
-        model_specs["outcome_scoring"],
-        device=device,
-        post_action=False,
-        **state_inputs,
-    )
-    conceding_failure, conceding_success = inference_gnn(
-        possession,
-        model_specs["outcome_conceding"],
-        device=device,
-        post_action=False,
-        **state_inputs,
-    )
-
-    components["action_intent"] = action_intent
-    components["pass_intent"] = pass_intent
-    components["pass_success"] = pass_success
-    components["model_pass_success"] = model_pass_success
-    components["pass_height"] = pass_height
-    components["outcome_scoring_success"] = scoring_success
-    components["outcome_scoring_failure"] = scoring_failure
-    components["outcome_conceding_success"] = conceding_success
-    components["outcome_conceding_failure"] = conceding_failure
-    return components
+    return infer_components(possession, model_specs, device, predictor=inference_gnn,
+                            preflight=preflight_pc_xpass, xpass_runtime=xpass_runtime)
 
 
 def _expected_option_columns(player_meta: pd.DataFrame, include_shot: bool) -> list[str]:
@@ -788,7 +738,9 @@ def build_skillcorner_component_table(
         .copy()
     )
     if component_frame is None or component_frame.empty:
-        return pd.DataFrame(columns=ordered_columns)
+        component_frame = pd.DataFrame(index=possession.frame_meta.index)
+        for player in option_columns:
+            component_frame[f"home_{player}" if player != "shot" else "home_goal"] = np.nan
 
     mapped = _map_component_columns(component_frame, include_shot).rename_axis("frame").reset_index()
     metadata = metadata.loc[metadata["frame"].isin(mapped["frame"])].copy()
@@ -838,29 +790,19 @@ def summarize_skillcorner_stats(
 
 
 def load_skillcorner_models(
-    action_intent_model_id: str,
-    pass_intent_model_id: str,
-    pass_success_model_id: str,
-    outcome_scoring_model_id: str,
-    outcome_conceding_model_id: str,
-    device: str,
+    action_intent_model_id: str | None = None,
+    pass_intent_model_id: str | None = None,
+    pass_success_model_id: str | None = None,
+    outcome_scoring_model_id: str | None = None,
+    outcome_conceding_model_id: str | None = None,
+    device: str = "cpu",
     pass_height_model_id: str | None = None,
 ) -> dict[str, Any]:
-    from models.utils import load_model
-
-    model_specs = {
-        "action_intent": load_model(action_intent_model_id, device),
-        "pass_intent": load_model(pass_intent_model_id, device),
-        "pass_success": load_model(pass_success_model_id, device),
-        "outcome_scoring": load_model(outcome_scoring_model_id, device),
-        "outcome_conceding": load_model(outcome_conceding_model_id, device),
-    }
-    if pass_height_model_id:
-        model_specs["pass_height"] = load_model(pass_height_model_id, device)
-    missing = [name for name, model in model_specs.items() if model is None]
-    if missing:
-        raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
-    return model_specs
+    return load_component_models({
+        "action_intent": action_intent_model_id, "pass_intent": pass_intent_model_id,
+        "pass_success": pass_success_model_id, "pass_height": pass_height_model_id,
+        "outcome_scoring": outcome_scoring_model_id, "outcome_conceding": outcome_conceding_model_id,
+    }, device)
 
 
 def load_skillcorner_component_tables(component_dir: str | Path, match_id: str, *, allow_partial=False) -> dict[str, pd.DataFrame]:

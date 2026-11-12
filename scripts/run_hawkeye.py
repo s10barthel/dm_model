@@ -5,7 +5,6 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -34,6 +33,11 @@ from datatools.hawkeye import (
     summarize_hawkeye_stats,
 )
 from scripts.comparison_warnings import add_warning_argument
+from scripts.inference_components import (
+    COMPONENT_MODEL_TASKS, confirm_component_selection, configure_xpass_runtime,
+    validate_component_dependencies, runtime_uses_xpass, runtime_kwargs,
+    require_sportec_feature_context,
+)
 from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.hawkeye_model_warnings import HAWKEYE_MODEL_TASKS, confirm_missing_hawkeye_models
 from scripts.visualize_hawkeye import (
@@ -314,7 +318,7 @@ def main() -> None:
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
-            "pass_height": args.pass_height_model_id,
+            "pass_height": getattr(args, "pass_height_model_id", None),
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
@@ -324,9 +328,7 @@ def main() -> None:
         require_target_family=False,
         require_shared_split=False,
     )
-    if args.use_physical_xpass and args.xpass_weight != "v0" and "pass_success" not in resolved_model_ids:
-        raise ValueError(f"--xpass-weight {args.xpass_weight} requires --pass-success-model-id or a pass_success model in --bundle-id.")
-    validate_auxiliary_selectors(args)
+    validate_component_dependencies(args, resolved_model_ids)
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     component_run_id = args.run_id or generate_run_id("hawkeye_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_COMPONENT_RUNS_DIR
@@ -361,35 +363,7 @@ def main() -> None:
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
     pass_success_model = model_specs.get("pass_success")
-    pass_success_runtime = pass_success_model
-    if pass_success_runtime is None and args.use_physical_xpass:
-        # Runtime configuration only: never loaded, forwarded, or reported as a checkpoint.
-        pass_success_runtime = SimpleNamespace(args={"task": "pass_success"})
-    if pass_success_runtime is not None and bool(getattr(args, "use_physical_xpass", False)):
-        pass_success_runtime.args["inference_use_physical_xpass"] = True
-        pass_success_runtime.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
-        pass_success_runtime.args["pc_xpass_id"] = getattr(args, "pc_xpass_id", None)
-        pass_success_runtime.args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
-        pass_success_runtime.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
-        if getattr(args, "v4_power", None) is not None:
-            pass_success_runtime.args["v4_power"] = float(args.v4_power)
-        if getattr(args, "v4_zero", None) is not None:
-            pass_success_runtime.args["v4_zero"] = float(args.v4_zero)
-        pass_success_runtime.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
-        pass_success_runtime.args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
-        pass_success_runtime.args["v5_discount"] = bool(getattr(args, "v5_discount", True))
-        if getattr(args, "pass_height_threshold", None) is not None:
-            pass_success_runtime.args["pass_height_threshold"] = args.pass_height_threshold
-        pass_success_runtime.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
-    if pass_success_runtime is not None and (model_uses_physical_xpass(pass_success_runtime.args) or inference_uses_physical_xpass(pass_success_runtime.args)):
-        pass_success_runtime.args["physical_runtime_cache_disabled"] = no_physical_cache
-        pass_success_runtime.args["physical_runtime_cache_refresh"] = False
-        pass_success_runtime.args["physical_num_workers"] = physical_num_workers
-        pass_success_runtime.args["physical_worker_thread_limit"] = physical_worker_thread_limit
-        pass_success_runtime.args["physical_batch_size"] = physical_batch_size
-        pass_success_runtime.args["physical_runtime_cache_read_only"] = True
-        if not no_physical_cache:
-            pass_success_runtime.args["physical_cache_dir"] = physical_cache_dir
+    pass_success_runtime = configure_xpass_runtime(args, model_specs, physical_cache_dir)
     configure_auxiliary_models(args, model_specs, device)
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("hawkeye", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))

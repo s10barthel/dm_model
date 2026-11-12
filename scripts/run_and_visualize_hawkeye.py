@@ -36,6 +36,10 @@ from models.inference_masks import add_inference_mask_arguments, configure_infer
 from models.edge_schema import generation_kwargs
 from models.utils import load_bundle_record, load_model, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
+from scripts.inference_components import (
+    ComponentModels, configure_xpass_runtime, uses_cached_v0,
+    confirm_visualization_selection, require_sportec_feature_context,
+)
 from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import (add_top_pass_selector, resolve_top_pass_selector,
                                XPassVersionSelection, validate_xpass_weight_options)
@@ -305,7 +309,9 @@ def collect_situation_components(situation, model_specs, device, inference_frame
                                  rendered_components, prediction_cache=None):
     rendered_components = input_components(rendered_components)
     components: dict[str, pd.DataFrame] = {}
-    preflight_pc_xpass(situation, model_specs.get("pass_success"), event_indices=inference_frame_ids)
+    runtime = model_specs.get("pass_success", getattr(model_specs, "xpass_runtime", None))
+    preflight_pc_xpass(situation, runtime, event_indices=inference_frame_ids,
+        graph_override=situation.graph_features_0, label_override=situation.labels)
     precomputed_auxiliaries = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
         if "action_intent" in model_specs:
@@ -351,6 +357,10 @@ def collect_situation_components(situation, model_specs, device, inference_frame
             )
             if "model_pass_success" in rendered_components:
                 components["model_pass_success"] = model_probabilities
+        if "pass_success" not in model_specs and runtime is not None and {"pass_success", "pass_score"} & set(rendered_components):
+            from inference import inference_xpass_v0
+            components["pass_success"] = inference_xpass_v0(situation, runtime,
+                graphs=situation.graph_features_0, labels=situation.labels, event_indices=inference_frame_ids)
         if "outcome_scoring" in model_specs:
             scoring_failure, scoring_success = cached_prediction(
                 prediction_cache, inference_gnn,
@@ -374,7 +384,7 @@ def collect_situation_components(situation, model_specs, device, inference_frame
             components["outcome_conceding_success"] = conceding_success
             components["outcome_conceding_failure"] = conceding_failure
 
-    if "pass_success" in components and not bool(model_specs["pass_success"].args.get("use_carries", False)):
+    if "pass_success" in model_specs and "pass_success" in components and not bool(model_specs["pass_success"].args.get("use_carries", False)):
         possessors = (situation.actions["object_id"] if hasattr(situation, "actions")
                       else situation.frame_meta["possessor_object_id"])
         mask_unsupported_carry_success(components, possessors)
@@ -567,6 +577,19 @@ def main() -> None:
     start_inference_attempt(output_root, args)
     output_root.mkdir(parents=True, exist_ok=True)
 
+    explicit_model_ids = {
+        "action_intent": getattr(args, "action_intent_model_id", None),
+        "pass_intent": getattr(args, "pass_intent_model_id", None),
+        "pass_success": getattr(args, "pass_success_model_id", None),
+        "pass_height": getattr(args, "pass_height_model_id", None),
+        "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
+        "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
+    }
+    selected_bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
+    available_ids = dict((selected_bundle or {}).get("model_ids") or {})
+    available_ids.update({k: v for k, v in explicit_model_ids.items() if v})
+    component_selection = select_inference_components(args, available_ids)
+    model_selection = confirm_visualization_selection(available_ids, args, output_root)
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     requested_situation_ids = [str(value) for value in (args.situation_id or [])]
@@ -607,18 +630,6 @@ def main() -> None:
         }
         if not situation_ids:
             raise ValueError("No coach-rated Hawkeye situations were found among the selected situations.")
-    explicit_model_ids = {
-        "action_intent": getattr(args, "action_intent_model_id", None),
-        "pass_intent": getattr(args, "pass_intent_model_id", None),
-        "pass_success": getattr(args, "pass_success_model_id", None),
-        "pass_height": getattr(args, "pass_height_model_id", None),
-        "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
-        "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
-    }
-    selected_bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
-    available_ids = dict((selected_bundle or {}).get("model_ids") or {})
-    available_ids.update({k: v for k, v in explicit_model_ids.items() if v})
-    component_selection = select_inference_components(args, available_ids)
     required_model_tasks = [
         task
         for task in [
@@ -629,7 +640,7 @@ def main() -> None:
             "outcome_scoring",
             "outcome_conceding",
         ]
-        if task in component_selection.required_component_groups
+        if task in component_selection.required_component_groups and (available_ids.get(task) or not uses_cached_v0(args))
     ]
     if required_model_tasks:
         model_ids, shared_context, _ = resolve_model_selection(
@@ -655,7 +666,7 @@ def main() -> None:
         for name, model_id in model_ids.items()
         if name in component_selection.required_component_groups
     }
-    model_specs = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
+    model_specs = ComponentModels({name: load_model(model_id, device) for name, model_id in selected_model_ids.items()} )
     from models.outcome_learning import configure_distribution_exports
     configure_distribution_exports(model_specs, getattr(args, "export_outcome_distributions", False))
     missing = [name for name, model in model_specs.items() if model is None]
@@ -679,30 +690,7 @@ def main() -> None:
     component_selection = finish_inference_selection(
         args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
     pass_success_model = model_specs.get("pass_success")
-    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
-        pass_success_model.args["inference_use_physical_xpass"] = True
-        pass_success_model.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
-        pass_success_model.args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
-        pass_success_model.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
-        if getattr(args, "v4_power", None) is not None:
-            pass_success_model.args["v4_power"] = float(args.v4_power)
-        if getattr(args, "v4_zero", None) is not None:
-            pass_success_model.args["v4_zero"] = float(args.v4_zero)
-        pass_success_model.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
-        pass_success_model.args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
-        pass_success_model.args["v5_discount"] = bool(getattr(args, "v5_discount", True))
-        if getattr(args, "pass_height_threshold", None) is not None:
-            pass_success_model.args["pass_height_threshold"] = args.pass_height_threshold
-        pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
-    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
-        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
-        pass_success_model.args["physical_runtime_cache_refresh"] = False
-        pass_success_model.args["physical_num_workers"] = getattr(args, "physical_num_workers", "auto")
-        pass_success_model.args["physical_worker_thread_limit"] = int(getattr(args, "physical_worker_thread_limit", 1))
-        pass_success_model.args["physical_batch_size"] = int(getattr(args, "physical_batch_size", 16))
-        pass_success_model.args["physical_runtime_cache_read_only"] = True
-        if not no_physical_cache:
-            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    pass_success_runtime = configure_xpass_runtime(args, model_specs, physical_cache_dir)
     graph_schema = validate_model_graph_schemas(model_specs)
 
     output_dirs: list[Path] = []
@@ -711,7 +699,7 @@ def main() -> None:
     physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
-    validate_pc_xpass_startup(pass_success_model)
+    validate_pc_xpass_startup(pass_success_runtime)
     for situation_id in situation_ids:
         render_kwargs = dict(
             situation_id=situation_id,
@@ -751,6 +739,7 @@ def main() -> None:
         print(f"Saved Hawkeye {selected_output_mode} visualizations to {output_dir}")
 
     metadata = {
+        "model_selection": model_selection,
         **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
@@ -790,43 +779,43 @@ def main() -> None:
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
-        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
-        "x_pass_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["x_pass_version"] if pass_success_model is not None else None,
-        "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_model is not None else None,
-        "pass_height_probability_definition": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["pass_height_definition"] if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["source"] if pass_success_runtime is not None else None,
+        "x_pass_version": physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["x_pass_version"] if pass_success_runtime is not None else None,
+        "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_runtime is not None else None,
+        "pass_height_probability_definition": physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["pass_height_definition"] if pass_success_runtime is not None else None,
         "observed_pass_height_threshold_meters": getattr(args, "pass_height_threshold", None),
         "physical_xpass_v4_power": (
-            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_power"]
-            if pass_success_model is not None
-            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
+            physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["v4_power"]
+            if pass_success_runtime is not None
+            and physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
             else None
         ),
         "physical_xpass_v4_zero": (
-            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_zero"]
-            if pass_success_model is not None
-            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
+            physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["v4_zero"]
+            if pass_success_runtime is not None
+            and physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
             else None
         ),
         "physical_xpass_v4_discount": (
-            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_discount"]
-            if pass_success_model is not None
-            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
+            physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["v4_discount"]
+            if pass_success_runtime is not None
+            and physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
             else None
         ),
         "physical_xpass_v5_intent_threshold": (
-            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v5_intent_threshold"]
-            if pass_success_model is not None
-            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
+            physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["v5_intent_threshold"]
+            if pass_success_runtime is not None
+            and physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
             else None
         ),
         "physical_xpass_v5_discount": (
-            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v5_discount"]
-            if pass_success_model is not None
-            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
+            physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["v5_discount"]
+            if pass_success_runtime is not None
+            and physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
             else None
         ),
         "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if getattr(args, "xpass_weight", "v3") == "v5" else None,
-        "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
+        "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_runtime.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_runtime is not None else None,
         "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
         "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
@@ -854,10 +843,10 @@ def main() -> None:
     }
     metadata.update(model_pass_success_metadata(
         requested=needs_model_pass_success(args),
-        available=needs_model_pass_success(args), output_root=output_root,
+        available=needs_model_pass_success(args) and pass_success_model is not None, output_root=output_root,
     ))
     metadata.update(comparison_metadata(args, output_root))
-    if pass_success_model is None and needs_physical_xpass(args):
+    if pass_success_runtime is None and needs_physical_xpass(args):
         metadata["physical_xpass_runtime_source"] = physical_xpass_panel_source(args, physical_cache_dir)
         metadata["x_pass_version"] = args.x_pass_version
     if comparison_xpass:
@@ -868,8 +857,8 @@ def main() -> None:
     from models.outcome_learning import write_distribution_exports
     metadata["outcome_distribution_exports"] = write_distribution_exports(output_root, model_specs)
     metadata_path = write_run_metadata(output_root, metadata)
-    physical_xpass_required = pass_success_model is not None and (
-        model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
+    physical_xpass_required = pass_success_runtime is not None and (
+        model_uses_physical_xpass(pass_success_runtime.args) or inference_uses_physical_xpass(pass_success_runtime.args)
     )
     physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
         physical_xpass_required=physical_xpass_required,

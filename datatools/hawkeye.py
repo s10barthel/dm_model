@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from datatools.component_inference import infer_components, load_component_models
 import torch
 from torch_geometric.data import Data
 
@@ -826,71 +827,8 @@ def infer_hawkeye_components(
     *,
     xpass_runtime=None,
 ) -> dict[str, pd.DataFrame]:
-    components: dict[str, pd.DataFrame] = {}
-    if situation.labels.numel() == 0 or not situation.graph_features_0:
-        return components
-
-    pass_model = model_specs.get("pass_success")
-    preflight_pc_xpass(situation, pass_model or xpass_runtime, graph_override=situation.graph_features_0, label_override=situation.labels)
-
-    action_intent = pd.DataFrame()
-    if "action_intent" in model_specs:
-        action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
-    precomputed_auxiliaries = {}
-    pass_intent = pd.DataFrame()
-    if "pass_intent" in model_specs:
-        pass_intent, _ = inference_gnn(situation, model_specs["pass_intent"], device=device, post_action=False,
-                                       precomputed_auxiliaries=precomputed_auxiliaries)
-    if "pass_height" in model_specs:
-        pass_height, _ = inference_gnn(situation, model_specs["pass_height"], device=device, post_action=False,
-                                       precomputed_auxiliaries=precomputed_auxiliaries)
-    else:
-        pass_height = pd.DataFrame()
-    try:
-        pass_success, model_pass_success = pd.DataFrame(), pd.DataFrame()
-        if pass_model is None and xpass_runtime is not None:
-            pass_success = inference_xpass_v0(situation, xpass_runtime,
-                graphs=situation.graph_features_0, labels=situation.labels)
-        elif pass_model is not None:
-            pass_success, model_pass_success = inference_gnn(
-                situation,
-                pass_model,
-                device=device,
-                post_action=False,
-                return_model_pass_success=True,
-                pass_intent_probs=pass_intent,
-                precomputed_auxiliaries=precomputed_auxiliaries,
-            )
-    except PhysicalXPassNoUsableRowsError:
-        pass_success = pd.DataFrame()
-        model_pass_success = pd.DataFrame()
-    scoring_failure, scoring_success = pd.DataFrame(), pd.DataFrame()
-    if "outcome_scoring" in model_specs:
-        scoring_failure, scoring_success = inference_gnn(
-            situation,
-            model_specs["outcome_scoring"],
-            device=device,
-            post_action=False,
-        )
-    conceding_failure, conceding_success = pd.DataFrame(), pd.DataFrame()
-    if "outcome_conceding" in model_specs:
-        conceding_failure, conceding_success = inference_gnn(
-            situation,
-            model_specs["outcome_conceding"],
-            device=device,
-            post_action=False,
-        )
-
-    components["action_intent"] = action_intent
-    components["pass_intent"] = pass_intent
-    components["pass_success"] = pass_success
-    components["model_pass_success"] = model_pass_success
-    components["pass_height"] = pass_height
-    components["outcome_scoring_success"] = scoring_success
-    components["outcome_scoring_failure"] = scoring_failure
-    components["outcome_conceding_success"] = conceding_success
-    components["outcome_conceding_failure"] = conceding_failure
-    return components
+    return infer_components(situation, model_specs, device, predictor=inference_gnn,
+                            preflight=preflight_pc_xpass, xpass_runtime=xpass_runtime)
 
 
 def _merge_component_column(
@@ -1147,18 +1085,8 @@ def load_hawkeye_models(
     device: str = "cpu",
     pass_height_model_id: str | None = None,
 ) -> dict[str, Any]:
-    from models.utils import load_model
-
-    model_ids = {
-        "action_intent": action_intent_model_id,
-        "pass_intent": pass_intent_model_id,
-        "pass_success": pass_success_model_id,
-        "outcome_scoring": outcome_scoring_model_id,
-        "outcome_conceding": outcome_conceding_model_id,
-        "pass_height": pass_height_model_id,
-    }
-    model_specs = {task: load_model(model_id, device) for task, model_id in model_ids.items() if model_id}
-    missing = [name for name, model in model_specs.items() if model is None]
-    if missing:
-        raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
-    return model_specs
+    return load_component_models({
+        "action_intent": action_intent_model_id, "pass_intent": pass_intent_model_id,
+        "pass_success": pass_success_model_id, "pass_height": pass_height_model_id,
+        "outcome_scoring": outcome_scoring_model_id, "outcome_conceding": outcome_conceding_model_id,
+    }, device)

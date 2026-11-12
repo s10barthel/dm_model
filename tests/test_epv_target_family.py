@@ -155,6 +155,8 @@ class EpvWrapperTests(unittest.TestCase):
         self.assertEqual(resolved["pass_success"], "pass_success/override")
         resolve.assert_called_once_with(
             required_tasks=generate_epv.REQUIRED_EPV_MODEL_TASKS,
+            optional_tasks=["pass_success"],
+            warning_collector=None,
             bundle_id="bundle_1",
             explicit_model_ids={
                 "pass_intent": None,

@@ -242,7 +242,7 @@ def test_epv_attempt_preserves_canonical_outputs_on_blend_failure(tmp_path, fixt
     monkeypatch.setattr(epv, "EPV_MATCH_DIR", match_dir)
     monkeypatch.setattr(epv, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(epv, "generate_run_id", lambda *a: "attempt")
-    monkeypatch.setattr(epv, "resolve_epv_model_selection", lambda *a: (ids, {}, None))
+    monkeypatch.setattr(epv, "resolve_epv_model_selection", lambda *a, **k: (ids, {}, None))
     monkeypatch.setattr(epv, "load_epv_models", lambda *a: {task: model for task in tasks})
     monkeypatch.setattr(epv, "configure_epv_physical_xpass", lambda *a: str(folder))
     monkeypatch.setattr(epv, "validate_model_graph_schemas", lambda *a: {"add_v_edge_features": False})
@@ -290,6 +290,7 @@ def test_epv_attempt_preserves_canonical_outputs_on_blend_failure(tmp_path, fixt
 def test_runner_startup_writes_failed_metadata_before_unit_preparation(tmp_path, monkeypatch, provider):
     import importlib
     from unittest.mock import Mock
+    monkeypatch.setattr("builtins.input", lambda *a: "yes")
     script = importlib.import_module("scripts.run_" + provider)
     output = tmp_path / "runs"
     flags = ["--pc-xpass", "--use-physical-xpass", "--xpass-weight", "v1", "--run-id", "attempt",
@@ -308,7 +309,7 @@ def test_runner_startup_writes_failed_metadata_before_unit_preparation(tmp_path,
     monkeypatch.setattr(script, "validate_model_graph_schemas", lambda *a: {"node_in_dim": 26, "edge_in_dim": 2})
     if provider == "relevant_models":
         monkeypatch.setattr(script, "load_model", lambda identifier, device: models[identifier.split('/')[0]])
-        monkeypatch.setattr(script, "resolve_component_feature_run_context", lambda *a: {
+        monkeypatch.setattr(script, "resolve_component_feature_run_context", lambda *a, **k: {
             "feature_run_id": "feature", "feature_root": tmp_path / "feature", "feature_schema": {},
             "intended_receiver_mode": "model", "selection": "explicit"})
         prepare = Mock()
@@ -349,6 +350,7 @@ def test_location_attempt_keeps_fatal_error_and_finishes_cache_generation(tmp_pa
     from unittest.mock import Mock
     args = Namespace(run_id="attempt", output_dir=str(tmp_path), overwrite=False)
     monkeypatch.setattr(script, "parse_args", lambda: args)
+    monkeypatch.setattr(script, "_resolve_location_models", lambda *a: ({}, {}, None))
     monkeypatch.setattr(script.pc_versions, "start_generation", lambda *a, **k: None)
     finish = Mock(side_effect=OSError("cleanup") if cleanup_fails else None)
     monkeypatch.setattr(script.pc_versions, "finish_generation", finish)

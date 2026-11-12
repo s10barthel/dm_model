@@ -82,7 +82,7 @@ def assert_outputs(root, count):
 
 
 @pytest.mark.parametrize("module,required,pc_cache,explicit_feature", [
-    (sportec, ["--match-id", "s"], False, False), (sportec, ["--match-id", "s"], True, False),
+    (sportec, ["--match-id", "s"], False, True), (sportec, ["--match-id", "s"], True, False),
     (sportec, ["--match-id", "s"], "directory", False),
     (sportec, ["--match-id", "s"], True, True), (direct, [], False, False), (direct, [], True, False)])
 def test_inference_commands_skip_all_model_dependencies(tmp_path, monkeypatch, inference_fixture, module, required, pc_cache, explicit_feature):

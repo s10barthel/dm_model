@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -196,12 +197,17 @@ def compute_game_state_values(scored_df: pd.DataFrame) -> pd.DataFrame:
 
     scored_df["weighted_pass_score"] = scored_df["pass_intent"] * scored_df["pass_score"]
 
-    return (
+    values = (
         scored_df.groupby(["modification", "game_state"])["weighted_pass_score"]
         .sum(min_count=1)
         .rename("game_state_value")
         .reset_index()
     )
+    incomplete = (scored_df["pass_intent"].gt(0) & scored_df["pass_score"].isna()).groupby(
+        [scored_df["modification"], scored_df["game_state"]]).any()
+    invalid = values.set_index(["modification", "game_state"]).index.map(incomplete).fillna(False)
+    values.loc[invalid, "game_state_value"] = float("nan")
+    return values
 
 
 def compute_avg_pass_scores(scored_df: pd.DataFrame) -> pd.DataFrame:
@@ -276,14 +282,14 @@ def add_pairwise_rating(
     return rated_df
 
 
-def build_benchmark_summary(benchmark_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+def build_benchmark_summary(benchmark_df: pd.DataFrame, *, pass_intent_available=True) -> tuple[pd.DataFrame, dict[str, int]]:
     benchmark_df = normalize_identifier_columns(benchmark_df)
     modification_labels = collect_modification_labels(benchmark_df)
 
     filtered_df = filter_pass_intent_rows(benchmark_df)
     scored_df = add_pass_scores(filtered_df)
     game_state_values = compute_game_state_values(scored_df)
-    avg_pass_scores = compute_avg_pass_scores(scored_df)
+    avg_pass_scores = compute_avg_pass_scores(scored_df if pass_intent_available else add_pass_scores(benchmark_df))
     summary_df = pivot_metric_values(
         modification_labels,
         game_state_values,
@@ -385,7 +391,11 @@ def run_benchmark_postprocessing(
     validate_required_columns(benchmark_df, REQUIRED_COLUMNS, "Benchmark input")
     benchmark_df = coerce_numeric_columns(benchmark_df, NUMERIC_COLUMNS)
 
-    summary_df, stats = build_benchmark_summary(benchmark_df)
+    metadata_path = run_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig")) if metadata_path.exists() else {}
+    configured = metadata.get("model_selection", {}).get("availability", {}).get("available", {})
+    summary_df, stats = build_benchmark_summary(benchmark_df,
+        pass_intent_available=configured.get("pass_intent", True))
 
     summary_path = run_root / OUTPUT_FILENAME
     text_summary_path = run_root / SUMMARY_TEXT_FILENAME

@@ -39,6 +39,11 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from scripts.comparison_warnings import add_warning_argument
+from scripts.inference_components import (
+    COMPONENT_MODEL_TASKS, confirm_component_selection, configure_xpass_runtime,
+    validate_component_dependencies, runtime_kwargs, require_sportec_feature_context,
+)
+from datatools.component_inference import blank_state_predictions
 from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -207,6 +212,7 @@ def resolve_component_feature_run_context(
             or inference_uses_physical_xpass(pass_success_args)
         )
     )
+    require_sportec_feature_context(args, shared_context, bundle, cache_selected=use_cache_feature_run)
     try:
         if use_cache_feature_run:
             metadata = pc_versions.read_metadata(physical_cache_dir)
@@ -705,18 +711,14 @@ def main() -> None:
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
         warning_collector=outcome_warnings,
-        required_tasks=[
-            "action_intent",
-            "pass_intent",
-            "pass_success",
-            "outcome_scoring",
-            "outcome_conceding",
-        ],
+        required_tasks=[],
+        optional_tasks=list(COMPONENT_MODEL_TASKS),
         bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
+            "pass_height": getattr(args, "pass_height_model_id", None),
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
@@ -725,6 +727,7 @@ def main() -> None:
         require_return_type=False,
         require_target_family=False,
     )
+    validate_component_dependencies(args, resolved_model_ids)
     pass_height_model_id = resolve_optional_model_id("pass_height", getattr(args, "pass_height_model_id", None), bundle)
     if pass_height_model_id:
         resolved_model_ids["pass_height"] = pass_height_model_id
@@ -732,19 +735,9 @@ def main() -> None:
     output_parent = Path(args.output_dir) if args.output_dir else SPORTEC_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
     start_inference_attempt(output_dir, args)
+    model_selection = confirm_component_selection(resolved_model_ids, args, output_dir)
 
-    model_specs = {
-        "action_intent": load_model(resolved_model_ids["action_intent"], device),
-        "pass_intent": load_model(resolved_model_ids["pass_intent"], device),
-        "pass_success": load_model(resolved_model_ids["pass_success"], device),
-        "outcome_scoring": load_model(resolved_model_ids["outcome_scoring"], device),
-        "outcome_conceding": load_model(
-            resolved_model_ids["outcome_conceding"],
-            device,
-        ),
-    }
-    if pass_height_model_id:
-        model_specs["pass_height"] = load_model(pass_height_model_id, device)
+    model_specs = {task: load_model(identifier, device) for task, identifier in resolved_model_ids.items()}
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
@@ -756,7 +749,8 @@ def main() -> None:
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = resolve_component_physical_cache_dir(args)
     pass_success_model = model_specs.get("pass_success")
-    pass_success_args = getattr(pass_success_model, "args", None)
+    pass_success_runtime = configure_xpass_runtime(args, model_specs, physical_cache_dir)
+    pass_success_args = getattr(pass_success_runtime, "args", None)
     pass_success_has_args = isinstance(pass_success_args, dict)
     runtime_feature_context = resolve_component_feature_run_context(
         args,
@@ -792,31 +786,7 @@ def main() -> None:
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
-    if pass_success_has_args and bool(getattr(args, "use_physical_xpass", False)):
-        pass_success_args["inference_use_physical_xpass"] = True
-        pass_success_args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
-        pass_success_args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
-        pass_success_args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
-        if getattr(args, "v4_power", None) is not None:
-            pass_success_args["v4_power"] = float(args.v4_power)
-        if getattr(args, "v4_zero", None) is not None:
-            pass_success_args["v4_zero"] = float(args.v4_zero)
-        pass_success_args["v4_discount"] = bool(getattr(args, "v4_discount", True))
-        pass_success_args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
-        pass_success_args["v5_discount"] = bool(getattr(args, "v5_discount", True))
-        if getattr(args, "pass_height_threshold", None) is not None:
-            pass_success_args["pass_height_threshold"] = args.pass_height_threshold
-        pass_success_args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
-    if pass_success_has_args and (model_uses_physical_xpass(pass_success_args) or inference_uses_physical_xpass(pass_success_args)):
-        pass_success_args["physical_runtime_cache_disabled"] = no_physical_cache
-        pass_success_args["physical_runtime_cache_refresh"] = False
-        pass_success_args["physical_num_workers"] = physical_num_workers
-        pass_success_args["physical_worker_thread_limit"] = physical_worker_thread_limit
-        pass_success_args["physical_batch_size"] = physical_batch_size
-        pass_success_args["physical_runtime_cache_read_only"] = True
-        if not no_physical_cache:
-            pass_success_args["physical_cache_dir"] = physical_cache_dir
-    validate_pc_xpass_startup(model_specs.get("pass_success"))
+    validate_pc_xpass_startup(pass_success_runtime)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
     success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
     (
@@ -857,6 +827,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "model_selection": model_selection,
         **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
@@ -889,13 +860,7 @@ def main() -> None:
         "frames": args.frames,
         "state_contract": state_contract_for_run(feature_root),
         "graph_schema": graph_schema,
-        "models": {
-            "action_intent": resolved_model_ids["action_intent"],
-            "pass_intent": resolved_model_ids["pass_intent"],
-            "pass_success": resolved_model_ids["pass_success"],
-            "outcome_scoring": resolved_model_ids["outcome_scoring"],
-            "outcome_conceding": resolved_model_ids["outcome_conceding"],
-        },
+        "models": dict(resolved_model_ids),
         "model_records": model_records,
         "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},
         "processed_match_ids": [],
@@ -904,7 +869,7 @@ def main() -> None:
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
-        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_args) if pass_success_has_args else None,
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
         "physical_xpass_runtime_source": physical_lookup_config.get("source"),
         "physical_xpass_metric": physical_lookup_config.get("metric"),
         "x_pass_version": physical_lookup_config.get("x_pass_version"),
@@ -955,6 +920,7 @@ def main() -> None:
             match_output_dir = output_dir / match_id
 
             tables = {}
+            valid_state_count = 0
             possession_report = None
             for state, possession_report in build_sportec_possessions(
                 match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
@@ -966,13 +932,15 @@ def main() -> None:
                     for model in model_specs.values():
                         if hasattr(model, "outcome_distribution_rows"):
                             model.outcome_distribution_rows.clear()
-                    components = infer_skillcorner_components(state, model_specs, device=device)
+                    components = infer_skillcorner_components(state, model_specs, device=device, **runtime_kwargs(model_specs, pass_success_runtime))
+                    valid_state_count += 1
                     records = [row for model in model_specs.values() for row in getattr(model, "outcome_distribution_rows", [])]
                     if records:
                         tables.setdefault("outcome_distributions", []).append(pd.DataFrame(records))
                     for name, prediction in components.items():
-                        if prediction is not None and (not prediction.empty or name == "model_pass_success"):
-                            tables.setdefault(name, []).append(sportec_component_table(prediction, state))
+                        if prediction is None or prediction.empty:
+                            prediction = blank_state_predictions(state)
+                        tables.setdefault(name, []).append(sportec_component_table(prediction, state))
                 except PCXPassBlendingError:
                     raise
                 except Exception as exc:
@@ -984,7 +952,7 @@ def main() -> None:
                     if value:
                         metadata.setdefault(attr, {}).setdefault(str(match_id), {})[str(state.event_index)] = value
             metadata.setdefault("possession_reports", {})[str(match_id)] = match.possession_report
-            if not tables.get("action_intent"):
+            if not valid_state_count:
                 raise ValueError("No valid possession states; check synchronized source events and tracking coverage.")
             match_output_dir.mkdir(parents=True, exist_ok=True)
             import pc_xpass_versions
@@ -1016,7 +984,7 @@ def main() -> None:
             metadata["skipped_matches"].append({"match_id": match_id, "error": error_summary})
             print(f"  SKIP {match_id}: {error_summary}")
 
-    metadata.update(model_pass_success_metadata())
+    metadata.update(model_pass_success_metadata(available=pass_success_model is not None))
     metadata.update(finalize_pc_xpass_attempt())
     metadata["status"] = "completed"
     write_run_metadata(output_dir, metadata)

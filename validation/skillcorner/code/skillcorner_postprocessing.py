@@ -224,6 +224,10 @@ def compute_model_scores(model_data: pd.DataFrame) -> pd.DataFrame:
         .rename("game_state_value")
         .reset_index()
     )
+    incomplete = (scored["pass_intent"].gt(0) & scored["pass_score"].isna()).groupby(
+        [scored["match_id"], scored["index"], scored["frame"]], dropna=False).any()
+    invalid = game_state_values.set_index(GAME_STATE_FRAME_KEY_COLUMNS).index.map(incomplete).fillna(False)
+    game_state_values.loc[invalid, "game_state_value"] = float("nan")
     return scored.merge(game_state_values, on=GAME_STATE_FRAME_KEY_COLUMNS, how="left")
 
 
