@@ -13,6 +13,7 @@ import torch
 from models.inference_masks import configure_inference_masks, flatten_mask_values, resolve_inference_mask_configurations
 from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.membership import explicit_split_provenance
 from physical_pass_model import (
     PC_XPASS_SOURCE, physical_xpass_metric_for_version,
@@ -346,7 +347,8 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
             subject, _, _ = mod.build_hawkeye_situation(scene_tracking, ball,
                 freeze_ballreceipt=args.freeze_ballreceipt, **({"build_graphs": False} if not variants[0].models else {}),
                 add_v_edge_features=bool(schema["add_v_edge_features"]),
-                add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)), **generation_kwargs(schema))
+                add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)), **generation_kwargs(schema),
+                **runtime_graph_feature_kwargs({(i, key): model for i, variant in enumerate(variants) for key, model in variant.models.items()}))
             selected_frames = mod.resolve_hawkeye_png_frames(subject, mod.resolve_ballreceipt(scene_tracking), mod.requested_time_norms(args))
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
             tables, cache, physical_tables = [], {}, {}
@@ -414,7 +416,9 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
         # This subject is a fixed snapshot for the group; select independent frame
         # views below instead of rebuilding every physical graph for every action.
         possession_states = list(build_sportec_possessions(subject, args.match_id, feature_root,
-            scope="actions", **getattr(subject, "runtime_graph_options", {})))
+            scope="actions", **{key: value for key, value in getattr(subject, "runtime_graph_options", {}).items()
+                                if key != "computed_extended_features"},
+            **runtime_graph_feature_kwargs({(i, key): model for i, variant in enumerate(variants) for key, model in variant.models.items()})))
     for variant in variants:
         variant.provenance["runtime_feature_context"] = {key: str(value) if isinstance(value, Path) else value for key, value in runtime.items()}
     for action_index, display_id in actions:

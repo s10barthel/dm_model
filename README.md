@@ -2561,6 +2561,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_hawkeye.py`
 
+See [Runtime inference efficiency](docs/inference_runtime.md) for automatic
+unused-feature elimination, shared outcome decoding, compatibility, and benchmarks.
+
 All six component checkpoint IDs are optional. Explicit IDs override bundle selections;
 IDs present in `--bundle-id` count as selected. Before loading tracking data or
 checkpoints, every omitted component is listed in a warning and the runner requires

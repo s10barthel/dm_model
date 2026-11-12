@@ -481,7 +481,7 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
 def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope="actions", frames=1,
                               add_v_edge_features=False, add_relative_speed_edge_features=False, possession_ids=None,
                               add_position_direction_edge_features=True, add_relative_velocity_edge_features=True,
-                              add_separation_rate_edge_features=True):
+                              add_separation_rate_edge_features=True, computed_extended_features=None):
     """Yield physical partitions; semantic spell ownership is kept in the manifest."""
     if scope not in ("actions", "frames") or not isinstance(frames, int) or frames < 1:
         raise ValueError("Expected scope actions/frames and a positive frame stride")
@@ -529,7 +529,8 @@ def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope
             elif any(not _finite(tracking.loc[frame].get(column)) for column in required):
                 reason = "missing_ball_or_possessor_tracking"
             graph = None if reason else construct_graph_for_frame(match, frame, carrier, tracking,
-                        infer_node_feature_dim(extend=True), **options)
+                        infer_node_feature_dim(extend=True), **options,
+                        **({"computed_extended_features": computed_extended_features} if computed_extended_features is not None else {}))
             if graph is None:
                 reason = reason or "invalid_graph"
             if reason:

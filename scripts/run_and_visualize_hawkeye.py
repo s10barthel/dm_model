@@ -34,6 +34,7 @@ from datatools.hawkeye import (
 from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.utils import load_bundle_record, load_model, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
 from scripts.inference_components import (
@@ -444,6 +445,7 @@ def render_situation(
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
         **generation_kwargs(graph_schema),
+        **runtime_graph_feature_kwargs(model_specs),
     )
     if overlay_data is None:
         coach_scores = pd.Series(dtype=float)

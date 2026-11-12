@@ -33,6 +33,7 @@ from datatools.skillcorner import (
     summarize_skillcorner_stats,
 )
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
 from scripts.comparison_warnings import add_warning_argument
@@ -371,6 +372,7 @@ def main() -> None:
                         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                         **generation_kwargs(graph_schema),
+                        **runtime_graph_feature_kwargs(model_specs),
                         scope=args.scope,
                         frames=args.frames,
                     )

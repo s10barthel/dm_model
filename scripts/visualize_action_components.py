@@ -42,6 +42,7 @@ from datatools.viz_snapshot import SnapshotVisualizer
 from inference import configure_lane_survival_runtime_cache, inference_gnn, load_success_intent_labels, resolve_match_id
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.utils import (
     aggregate_graph_schemas,
     get_model_record,
@@ -804,6 +805,12 @@ def collect_action_components(
         if panel_cache_dir:
             with blending_guard(runtime, "state_validation", match):
                 match_cache.require_format(panel_cache_dir, memo=cache_memo)
+        if possession_states is None:
+            match.runtime_graph_options = {
+                **{key: value for key, value in getattr(match, "runtime_graph_options", {}).items()
+                   if key != "computed_extended_features"},
+                **runtime_graph_feature_kwargs(loaded_models),
+            }
         pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root, possession_states)
 
     pass_model = runtime

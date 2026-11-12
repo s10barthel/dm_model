@@ -28,6 +28,7 @@ from datatools.match import Match
 from inference import PhysicalXPassNoUsableRowsError, inference_gnn, load_success_intent_labels
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.utils import (
     get_model_provenance,
     infer_feature_graph_schema,
@@ -930,6 +931,7 @@ def main() -> None:
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                 **generation_kwargs(graph_schema),
+                **runtime_graph_feature_kwargs(model_specs),
             ):
                 try:
                     for model in model_specs.values():

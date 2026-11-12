@@ -587,6 +587,7 @@ def _build_actions_and_labels(
     add_position_direction_edge_features: bool = True,
     add_relative_velocity_edge_features: bool = True,
     add_separation_rate_edge_features: bool = True,
+    computed_extended_features=None,
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
@@ -625,6 +626,7 @@ def _build_actions_and_labels(
             add_position_direction_edge_features=add_position_direction_edge_features,
             add_relative_velocity_edge_features=add_relative_velocity_edge_features,
             add_separation_rate_edge_features=add_separation_rate_edge_features,
+            computed_extended_features=computed_extended_features,
         )
         if graph is None:
             stats["skipped_missing_graph"] += 1
@@ -712,6 +714,7 @@ def build_hawkeye_situation(
     align_frozen_ball_to_possessor: bool = False,
     target_abs_time: float | None = None,
     clamp_target_possessor: bool = False,
+    computed_extended_features=None,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
@@ -810,6 +813,7 @@ def build_hawkeye_situation(
         add_position_direction_edge_features=add_position_direction_edge_features,
         add_relative_velocity_edge_features=add_relative_velocity_edge_features,
         add_separation_rate_edge_features=add_separation_rate_edge_features,
+        computed_extended_features=computed_extended_features,
     )
     situation.actions = actions
     situation.labels = labels

@@ -85,6 +85,7 @@ tests/AS_viz/
 !tests/test_hawkeye_target_clamping.py
 !tests/test_hawkeye_goal_placement.py
 !tests/test_hawkeye_optional_models.py
+!tests/test_inference_runtime_optimization.py
 !tests/test_optional_inference_datasets.py
 !tests/test_temporal_splits.py
 !tests/test_split_inference.py

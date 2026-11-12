@@ -47,6 +47,7 @@ from scripts.visualize_hawkeye import (
     resolve_hawkeye_time_norm_range,
 )
 from models.edge_schema import generation_kwargs
+from datatools.inference_features import runtime_graph_feature_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
@@ -398,6 +399,7 @@ def main() -> None:
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                 **generation_kwargs(graph_schema),
+                **runtime_graph_feature_kwargs(model_specs),
             )
             attacking_rows, frame_selections, range_metadata = filter_hawkeye_situation_by_time_norm(
                 situation,

@@ -165,6 +165,7 @@ def calculate_event_features(
     sequential=False,
     rotate_to_ltr: bool = True,
     eps=1e-6,
+    computed_extended_features=None,
 ) -> np.ndarray:
     seq_len = len(snapshot) if sequential else 1
 
@@ -268,34 +269,31 @@ def calculate_event_features(
     ]
 
     if extend:
-        player_xy = np.stack([player_x[-1], player_y[-1]], axis=-1)
-        dist_mat = cdist(player_xy, player_xy)
-
-        opponent_mask = is_teammate[-1] != is_teammate[-1][:, np.newaxis]
-        neighbor_mask = (dist_mat < 3.0) & opponent_mask
-        nearby_opponents_to_target: np.ndarray = neighbor_mask.sum(axis=1)
-
-        opponent_dists = np.where(opponent_mask, dist_mat, np.inf)
-        nearest_opponent_to_target: np.ndarray = opponent_dists.min(axis=1)
-
-        closer_mask = (goal_dists[-1][np.newaxis, :] < goal_dists[-1][:, np.newaxis]) & opponent_mask
-        closer_opponents_to_goal: np.ndarray = closer_mask.sum(axis=1)
-
+        from models.feature_masks import NODE_GROUPS
+        names = NODE_GROUPS["extended-node-features"]
+        required = set(names if computed_extended_features is None else computed_extended_features)
+        if required - set(names):
+            raise ValueError(f"Unknown computed extended features: {sorted(required - set(names))}")
+        values = {name: np.zeros(len(players), dtype=float) for name in names}
+        if required.intersection(names[:3]):
+            player_xy = np.stack([player_x[-1], player_y[-1]], axis=-1)
+            dist_mat = cdist(player_xy, player_xy)
+            opponent_mask = is_teammate[-1] != is_teammate[-1][:, np.newaxis]
+            if names[0] in required:
+                values[names[0]] = ((dist_mat < 3.0) & opponent_mask).sum(axis=1)
+            if names[1] in required:
+                values[names[1]] = np.where(opponent_mask, dist_mat, np.inf).min(axis=1)
+            if names[2] in required:
+                closer_mask = (goal_dists[-1][np.newaxis, :] < goal_dists[-1][:, np.newaxis]) & opponent_mask
+                values[names[2]] = closer_mask.sum(axis=1)
         args = [poss_x[-1, 0], poss_y[-1, 0], player_x[-1], player_y[-1], is_teammate[-1]]
-        nearest_opponent_to_pass = utils.find_nearest_opponent_to_pass(*args)
-        potential_interceptors = utils.count_potential_interceptors(*args)
-        potential_blockers = utils.count_potential_blockers(goal_x, goal_y, *args[2:])
-
-        event_features.extend(
-            [
-                nearby_opponents_to_target[np.newaxis, :],
-                nearest_opponent_to_target[np.newaxis, :],
-                closer_opponents_to_goal[np.newaxis, :],
-                nearest_opponent_to_pass[np.newaxis, :],
-                potential_interceptors[np.newaxis, :],
-                potential_blockers[np.newaxis, :],
-            ]
-        )
+        if names[3] in required:
+            values[names[3]] = utils.find_nearest_opponent_to_pass(*args)
+        if names[4] in required:
+            values[names[4]] = utils.count_potential_interceptors(*args)
+        if names[5] in required:
+            values[names[5]] = utils.count_potential_blockers(goal_x, goal_y, *args[2:])
+        event_features.extend(values[name][np.newaxis, :] for name in names)
 
     event_features.append(is_offside)
 
@@ -462,6 +460,7 @@ def construct_graph_for_frame(
     add_position_direction_edge_features: bool = True,
     add_relative_velocity_edge_features: bool = True,
     add_separation_rate_edge_features: bool = True,
+    computed_extended_features=None,
 ) -> Data | None:
     if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
         return None
@@ -492,6 +491,7 @@ def construct_graph_for_frame(
                 possessor,
                 extend,
                 rotate_to_ltr=rotate_to_ltr,
+                **({"computed_extended_features": computed_extended_features} if computed_extended_features is not None else {}),
             )[0],
             dtype=torch.float32,
         )

@@ -1142,6 +1142,30 @@ def inference_xpass_v0(match, model, *, graphs, labels, event_indices=None):
     return result
 
 
+def _batched_outcome_predictions(out, batch, offside, num_graphs, args):
+    """Decode independent outcome rows once, retaining CPU activation shapes.
+
+    Specialized output contracts keep their existing decoder and export paths.
+    CUDA pointwise activations can be batched; on CPU, keep each original slice
+    shape to avoid changing scalar/vectorized activation rounding.
+    """
+    from models.outcome_learning import expected_values, is_distributional
+    from models.outcome_decomposition import is_decomposition
+
+    if (args.get("task") not in {"outcome_scoring", "outcome_conceding", "outcome_return", "intent_return"}
+            or args.get("include_out", False) or is_distributional(args) or is_decomposition(args)):
+        return None
+    counts = torch.bincount(batch, minlength=num_graphs).cpu().numpy()
+    offsets = np.concatenate(([0], counts.cumsum()))
+    with torch.no_grad():
+        if out.device.type == "cuda":
+            values = expected_values(out, args)
+        else:
+            values = torch.cat([expected_values(out[start:end], args) for start, end in zip(offsets[:-1], offsets[1:])])
+        values = values.detach().cpu().numpy()
+    return values, offside.cpu().numpy().astype(bool), offsets
+
+
 def inference_gnn(
     match: Match,
     model: GNN,
@@ -1390,6 +1414,8 @@ def inference_gnn(
                         ]
                     )
 
+    bulk_outcomes = (_batched_outcome_predictions(out, batch, offside_out_mask, graphs.num_graphs, model.args)
+                     if gnn_task == "node_binary" else None)
     decomposition_predictions = {0: {}, 1: {}}
     players = set()
     final_players = set()
@@ -1407,16 +1433,19 @@ def inference_gnn(
             team = match.actions.at[event_index, "object_id"][:4]
             possessor_object_id = match.actions.at[event_index, "object_id"]
 
-        active_players = find_active_players(match.tracking, frame, team, include_goals=include_goals)
-
-        if gnn_task == "node_selection":
+        if bulk_outcomes is not None:
+            values, offside_values, offsets = bulk_outcomes
+            start, end = offsets[i:i + 2]
+            probs_i, offside_i = values[start:end], offside_values[start:end]
+        elif gnn_task == "node_selection":
             probs_i = torch.softmax(out[batch == i], dim=0).cpu().detach().numpy()
         elif gnn_task in ["node_binary", "graph_binary"]:
             from models.outcome_learning import expected_values
             probs_i = expected_values(out[batch == i], model.args).cpu().detach().numpy()
         elif gnn_task == "node_regression":
             probs_i = torch.sigmoid(out[batch == i]).cpu().detach().numpy() * 2 - 1
-        offside_i = offside_out_mask[batch == i].cpu().detach().numpy().astype(bool)
+        if bulk_outcomes is None:
+            offside_i = offside_out_mask[batch == i].cpu().detach().numpy().astype(bool)
 
         if out_filter == "teammates":
             player_indices_i = selected_node_ids[i]
@@ -1431,6 +1460,7 @@ def inference_gnn(
             if model.args.get("include_out", False):
                 player_indices_i.append("out")
         elif out_filter == "all":  # "receiver" in model.args["task"]
+            active_players = find_active_players(match.tracking, frame, team, include_goals=include_goals)
             player_indices_i = active_players[0] + active_players[1]
             if model.args["include_out"]:
                 player_indices_i.append("out")

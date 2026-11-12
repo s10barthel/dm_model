@@ -418,6 +418,7 @@ def _build_actions_and_labels(
     add_position_direction_edge_features: bool = True,
     add_relative_velocity_edge_features: bool = True,
     add_separation_rate_edge_features: bool = True,
+    computed_extended_features=None,
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
@@ -456,6 +457,7 @@ def _build_actions_and_labels(
             add_position_direction_edge_features=add_position_direction_edge_features,
             add_relative_velocity_edge_features=add_relative_velocity_edge_features,
             add_separation_rate_edge_features=add_separation_rate_edge_features,
+            computed_extended_features=computed_extended_features,
         )
         if graph is None:
             stats["skipped_missing_graph"] += 1
@@ -541,6 +543,7 @@ def build_benchmark_state(
     add_relative_velocity_edge_features: bool = True,
     add_separation_rate_edge_features: bool = True,
     build_graphs: bool = True,
+    computed_extended_features=None,
 ) -> tuple[BenchmarkState, pd.DataFrame, dict[str, int]]:
     if raw_state.empty:
         raise ValueError("Cannot build a benchmark state from an empty dataframe.")
@@ -589,6 +592,7 @@ def build_benchmark_state(
         add_position_direction_edge_features=add_position_direction_edge_features,
         add_relative_velocity_edge_features=add_relative_velocity_edge_features,
         add_separation_rate_edge_features=add_separation_rate_edge_features,
+        computed_extended_features=computed_extended_features,
     )
     state.actions = actions
     state.labels = labels
