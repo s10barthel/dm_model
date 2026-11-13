@@ -22,6 +22,293 @@ from training_state import (GradientAccumulator, atomic_torch_save, load_checkpo
     optimizer_snapshot, restore_optimizer_snapshot, capture_rng, restore_rng, resolve_resume_checkpoint,
     CHECKPOINT_NAME, dataset_signature, validate_learning_rates, add_training_runtime_arguments)
 from training_monitor import TrainingMonitor
+from training_preflight import TrainingInputError, preflight_training_files, require_complete_dataset
+
+
+@pytest.mark.parametrize("role", ["graph", "label"])
+@pytest.mark.parametrize("failure", ["missing", "denied", "empty", "read"])
+def test_training_preflight_reports_input_failures(tmp_path, monkeypatch, role, failure):
+    import errno
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir()
+    labels.mkdir()
+    for directory in (features, labels):
+        (directory / "match.pt").write_bytes(b"payload")
+    target = (features if role == "graph" else labels) / "match.pt"
+    original_open = Path.open
+    cause = None
+    if failure == "missing":
+        target.unlink()
+    elif failure == "empty":
+        target.write_bytes(b"")
+    else:
+        cause = PermissionError(errno.EACCES, "access denied", str(target)) if failure == "denied" else OSError(errno.EIO, "read failed")
+        if failure == "denied":
+            cause.winerror = 5
+
+        def failing_open(path, *args, **kwargs):
+            if path == target:
+                if failure == "denied":
+                    raise cause
+                stream = original_open(path, *args, **kwargs)
+
+                class FailedRead:
+                    def __enter__(self):
+                        return self
+
+                    def read(self, size):
+                        assert size == 1
+                        raise cause
+
+                    def __exit__(self, *exc):
+                        stream.close()
+
+                return FailedRead()
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", failing_open)
+    with pytest.raises(TrainingInputError) as caught:
+        preflight_training_files([("validation", ["match"], features, labels)])
+    message = str(caught.value)
+    for context in ("validation", "match", role, str(target.resolve())):
+        assert context in message
+    assert caught.value.__cause__ is not None
+    if cause is not None:
+        assert caught.value.__cause__ is cause
+        assert f"errno={cause.errno}" in message
+        if failure == "denied":
+            assert "winerror=5" in message
+
+
+def test_training_preflight_deduplicates_and_reads_only_one_byte(tmp_path, monkeypatch):
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir()
+    labels.mkdir()
+    for directory in (features, labels):
+        for mid in ("a", "b"):
+            (directory / f"{mid}.pt").write_bytes(b"large payload")
+    original_open, original_resolve = Path.open, Path.resolve
+    opens, reads, resolutions, active = [], [], [], []
+
+    def tracking_open(path, mode, buffering=-1):
+        assert mode == "rb" and buffering == 0
+        assert not active
+        opens.append(path)
+        stream = original_open(path, mode, buffering=buffering)
+        active.append(stream)
+
+        class TrackedRead:
+            def __enter__(self):
+                return self
+
+            def read(self, size):
+                reads.append(size)
+                return stream.read(size)
+
+            def __exit__(self, *exc):
+                stream.close()
+                active.remove(stream)
+
+        return TrackedRead()
+
+    def tracking_resolve(path, *args, **kwargs):
+        resolutions.append(path)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    monkeypatch.setattr(Path, "resolve", tracking_resolve)
+    with patch("torch.load", side_effect=AssertionError("preflight deserialized inputs")), \
+         patch("os.access", side_effect=AssertionError("preflight used os.access")), \
+         patch.object(Path, "rglob", side_effect=AssertionError("preflight scanned directories")):
+        preflight_training_files([
+            ("training", ["a", "a", "b"], features, labels),
+            ("validation", ["a"], features, labels),
+        ])
+    assert len(opens) == len(set(opens)) == 4
+    assert reads == [1] * 4
+    assert resolutions == [features, labels]
+    assert not active
+
+
+def test_training_preflight_stops_on_first_failure(tmp_path, monkeypatch):
+    calls = []
+    def deny(path, *args, **kwargs):
+        calls.append(path)
+        raise PermissionError("denied")
+    monkeypatch.setattr(Path, "open", deny)
+    with pytest.raises(TrainingInputError, match="first"):
+        preflight_training_files([("training", ["first", "second"], tmp_path, tmp_path)])
+    assert calls == [tmp_path / "first.pt"]
+
+
+def test_complete_training_dataset_preserves_row_filtering():
+    dataset = SimpleNamespace(loaded_match_ids=["filtered", "empty"], skipped_matches={},
+                              contributing_match_ids=["filtered"], skipped_rows={"graph_none": 5})
+    require_complete_dataset(dataset, ["filtered", "empty"], "training")
+    with pytest.raises(TrainingInputError, match="validation.*absent"):
+        require_complete_dataset(dataset, ["filtered", "absent"], "validation")
+    dataset.skipped_matches["empty"] = "label_tensor_has_invalid_shape"
+    with pytest.raises(TrainingInputError, match="empty.*label_tensor_has_invalid_shape"):
+        require_complete_dataset(dataset, ["filtered", "empty"], "training")
+
+
+@pytest.fixture
+def preflight_inputs(tmp_path):
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir()
+    labels.mkdir()
+    ids = ["m0", "m1", "v0"]
+    for mid in ids:
+        rows = torch.zeros(3, len(config.LABEL_COLUMNS))
+        rows[:, config.LABEL_INDEX["is_pass"]] = 1
+        rows[:, config.LABEL_INDEX["intent_index"]] = 1
+        rows[:, 7] = 1
+        rows[:, 0] = torch.arange(3)
+        torch.save([graph(5, 3) for _ in range(3)], features / f"{mid}.pt")
+        torch.save(rows, labels / f"{mid}.pt")
+    return dict(feature_dir=features, label_dir=labels, task="pass_intent", edge_in_dim=2,
+                graph_validation=False, goal_nodes_aware=False)
+
+
+@pytest.mark.parametrize("workers", [None, 1, 2], ids=["memory", "disk-serial", "disk-parallel"])
+@pytest.mark.parametrize("failure", ["corrupt", "shape", "alignment"])
+def test_training_rejects_file_skips_after_loading(tmp_path, preflight_inputs, workers, failure):
+    from dataset import ActionDataset
+    from prepared_dataset import PreparedActionDataset
+    target = preflight_inputs["label_dir"] / "m0.pt"
+    if failure == "corrupt":
+        target.write_bytes(b"invalid pickle")
+    else:
+        torch.save(torch.zeros(3) if failure == "shape" else torch.zeros(1, len(config.LABEL_COLUMNS)), target)
+    preflight_training_files([("training", ["m0", "m1"],
+                               preflight_inputs["feature_dir"], preflight_inputs["label_dir"])])
+    if workers is None:
+        dataset = ActionDataset(["m0", "m1"], **preflight_inputs)
+    else:
+        dataset = PreparedActionDataset(["m0", "m1"], **preflight_inputs,
+            cache_dir=tmp_path / "cache", preparation_workers=workers, progress=False)
+    assert "m1" in dataset.loaded_match_ids
+    with pytest.raises(TrainingInputError, match="training.*m0"):
+        require_complete_dataset(dataset, ["m0", "m1"], "training")
+
+
+def test_training_preflight_checks_warm_cache_without_rebuilding(tmp_path, preflight_inputs, monkeypatch):
+    import prepared_dataset as prepared
+    ids = ["m0", "m1"]
+    split = ("training", ids, preflight_inputs["feature_dir"], preflight_inputs["label_dir"])
+    preflight_training_files([split])
+    original = prepared.PreparedActionDataset(ids, **preflight_inputs,
+        cache_dir=tmp_path / "cache", progress=False)
+    monkeypatch.setattr(prepared.PreparedActionDataset, "_build_entry",
+                        lambda *a, **kw: pytest.fail("warm cache was rebuilt"))
+    with patch("torch.load", side_effect=AssertionError("preflight loaded payloads")):
+        preflight_training_files([split])
+    reused = prepared.PreparedActionDataset(ids, **preflight_inputs,
+        cache_dir=tmp_path / "cache", progress=False)
+    require_complete_dataset(reused, ids, "training")
+    assert reused.cache_id == original.cache_id
+    assert reused.preparation["reused"] == 2
+    target = preflight_inputs["feature_dir"] / "m0.pt"
+    original_open = Path.open
+    def deny(path, *a, **kw):
+        if path == target:
+            raise PermissionError("source access revoked")
+        return original_open(path, *a, **kw)
+    monkeypatch.setattr(Path, "open", deny)
+    with pytest.raises(TrainingInputError, match="source access revoked"):
+        preflight_training_files([split])
+
+
+@pytest.fixture
+def preflight_training_entry(tmp_path, monkeypatch, preflight_inputs):
+    import project_config as pc
+    import models.utils as utils
+    ids = ["m0", "m1", "v0"]
+    manifest = {"manifest_id": "fixture", "train": ids, "test": ["reserved"],
+                "metadata": {"train_size": 3}}
+    monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: None)
+    monkeypatch.setattr(pc, "resolve_feature_root", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(pc, "resolve_artifact_split", lambda *a, **kw: (manifest, "fixture"))
+    monkeypatch.setattr(pc, "get_model_run_root", lambda task, run_id: tmp_path / "saved" / task / run_id)
+    monkeypatch.setattr(utils, "run_epoch", lambda *a, **kw: pytest.fail("optimization started"))
+    argv = ["train.py", "--task", "pass_intent", "--model", "gat", "--device", "cpu",
+            "--feature_dir", str(preflight_inputs["feature_dir"]),
+            "--label_dir", str(preflight_inputs["label_dir"]), "--n_epochs", "1",
+            "--batch_size", "2", "--node_emb_dim", "8", "--graph_emb_dim", "8",
+            "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4",
+            "--no-goal-nodes", "--no-position-direction-edge-features",
+            "--no-relative-velocity-edge-features", "--no-separation-rate-edge-features",
+            "--graph-validation", "off", "--run-id", "preflight",
+            "--dataset-cache-dir", str(tmp_path / "cache")]
+    entry = Path(__file__).resolve().parents[1] / "train.py"
+    def invoke(*extra):
+        monkeypatch.setattr(sys, "argv", argv + list(extra))
+        try:
+            return runpy.run_path(str(entry), run_name="__main__")
+        finally:
+            faulthandler.disable()
+    return invoke
+
+
+@pytest.mark.parametrize("mode", ["memory", "disk"])
+def test_unreadable_validation_stops_before_dataset_preparation(preflight_training_entry,
+        preflight_inputs, monkeypatch, mode):
+    import dataset
+    import prepared_dataset
+    import models.gnn
+    import models.utils
+    target = preflight_inputs["label_dir"] / "v0.pt"
+    original_open = Path.open
+    def deny(path, *a, **kw):
+        if path == target:
+            raise PermissionError("validation access denied")
+        return original_open(path, *a, **kw)
+    monkeypatch.setattr(Path, "open", deny)
+    monkeypatch.setattr(dataset.ActionDataset, "__init__", lambda *a, **kw: pytest.fail("eager dataset started"))
+    monkeypatch.setattr(prepared_dataset.PreparedActionDataset, "__init__",
+                        lambda *a, **kw: pytest.fail("cache preparation started"))
+    monkeypatch.setattr(models.gnn, "GNN", lambda *a, **kw: pytest.fail("model constructed"))
+    with patch.object(models.utils, "load_splits", wraps=models.utils.load_splits) as splits:
+        with pytest.raises(TrainingInputError, match="validation.*v0.*label.*validation access denied"):
+            preflight_training_entry("--dataset-loading", mode, "--dataset-preparation-workers", "2")
+    assert splits.call_count == 1
+
+
+@pytest.mark.parametrize("failed_split,mid", [("training", "m0"), ("validation", "v0")])
+def test_real_training_checks_completeness_before_proceeding(preflight_training_entry,
+        preflight_inputs, monkeypatch, failed_split, mid):
+    import dataset
+    original_init = dataset.ActionDataset.__init__
+    original_load = torch.load
+    constructed = []
+    target = preflight_inputs["feature_dir"] / f"{mid}.pt"
+    def raced_load(path, *a, **kw):
+        if Path(path) == target:
+            raise PermissionError("access revoked after preflight")
+        return original_load(path, *a, **kw)
+    def init_with_race(self, ids, *a, **kw):
+        constructed.append(list(ids))
+        with patch("torch.load", side_effect=raced_load):
+            original_init(self, ids, *a, **kw)
+    monkeypatch.setattr(dataset.ActionDataset, "__init__", init_with_race)
+    with pytest.raises(TrainingInputError, match=f"{failed_split}.*{mid}.*access revoked"):
+        preflight_training_entry("--dataset-loading", "memory")
+    assert len(constructed) == (1 if failed_split == "training" else 2)
+
+
+def test_final_refit_preflights_only_selected_training_inputs(preflight_training_entry,
+        preflight_inputs, monkeypatch, tmp_path):
+    import training_preflight
+    checked = []
+    def check_and_stop(splits):
+        checked.extend((name, list(ids)) for name, ids, _, _ in splits)
+        preflight_training_files(splits)
+        raise RuntimeError("preflight completed")
+    monkeypatch.setattr(training_preflight, "preflight_training_files", check_and_stop)
+    # Neither this unused validation directory nor the reserved test file exists.
+    with pytest.raises(RuntimeError, match="preflight completed"):
+        preflight_training_entry("--final-refit", "--valid_feature_dir", str(tmp_path / "unused"))
+    assert checked == [("training", ["m0", "m1", "v0"])]
 
 
 def test_accumulation_matches_large_batches_with_partial_group_and_regularization():

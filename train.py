@@ -23,6 +23,7 @@ from cache_lifetime import training_context
 from ipw_options import add_ipw_arguments, restore_ipw_defaults
 from ipw_preparation import IPWPreparer
 from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
+from training_preflight import preflight_training_files, require_complete_dataset
 from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
     atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
     optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts, publish_stage_artifacts,
@@ -973,18 +974,28 @@ def main(cache_session):
             if not selected.is_dir():
                 raise FileNotFoundError(f"Missing selected stop-condition labels: {selected}")
             setattr(args, key, str(selected))
+    train_match_ids, valid_match_ids, _ = load_splits(
+        feature_dir=None,
+        manifest=args.split_manifest,
+        validation_mode=args.validation_mode,
+        validation_fold=args.validation_fold,
+        final_refit=args.final_refit,
+        validation_protocol=args.validation_protocol,
+        training_count=args.training_count,
+        validation_count=args.validation_count,
+        validation_fraction=args.validation_fraction,
+    )
+    input_splits = [("training", train_match_ids, args.train_feature_dir, args.train_label_dir)]
+    if not args.final_refit:
+        input_splits.append(("validation", valid_match_ids, args.valid_feature_dir, args.valid_label_dir))
+    preflight_training_files(input_splits)
     if args.use_epv:
         from datatools.epv_coverage import validate_labels
-        epv_train_ids, epv_valid_ids, _ = load_splits(
-            feature_dir=None, manifest=args.split_manifest, validation_mode=args.validation_mode,
-            validation_fold=args.validation_fold, final_refit=args.final_refit,
-            validation_protocol=args.validation_protocol, training_count=args.training_count,
-            validation_count=args.validation_count, validation_fraction=args.validation_fraction)
         args.epv_coverage_definition = validate_labels(
-            feature_root, feature_metadata, epv_train_ids, args.train_label_dir, args.return_type,
+            feature_root, feature_metadata, train_match_ids, args.train_label_dir, args.return_type,
             args.stop_condition, context="training")
         if not args.final_refit:
-            validate_labels(feature_root, feature_metadata, epv_valid_ids, args.valid_label_dir,
+            validate_labels(feature_root, feature_metadata, valid_match_ids, args.valid_label_dir,
                             args.return_type, args.stop_condition, context="validation")
     from datatools.trajectory import resolve_training_speed
     resolve_training_speed(args, checkpoint=goal_source)
@@ -1042,7 +1053,8 @@ def main(cache_session):
         "sources": dataset_signature(args),
         "preprocessing": LOADED_PREPROCESSING_FINGERPRINT,
         "training_code": hashlib.sha256(b"".join(path.read_bytes() for path in
-            [Path(__file__), Path("training_state.py"), Path("training_refit.py"), Path("project_config.py"), Path("packed_batch_loader.py"),
+            [Path(__file__), Path("training_state.py"), Path("training_refit.py"), Path("training_preflight.py"),
+             Path("project_config.py"), Path("packed_batch_loader.py"),
              *sorted(Path("models").glob("*.py"))])).hexdigest(),
     }
     if resume_checkpoint is not None and source_identity != resume_checkpoint["dataset_identity"]:
@@ -1225,17 +1237,6 @@ def main(cache_session):
         state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False, map_location=device)
         unwrap_model(model).load_state_dict(state_dict)
 
-    train_match_ids, valid_match_ids, _ = load_splits(
-        feature_dir=None,
-        manifest=args.split_manifest,
-        validation_mode=args.validation_mode,
-        validation_fold=args.validation_fold,
-        final_refit=args.final_refit,
-        validation_protocol=args.validation_protocol,
-        training_count=args.training_count,
-        validation_count=args.validation_count,
-        validation_fraction=args.validation_fraction,
-    )
     metadata.update(
         {
             "train_match_count": len(train_match_ids),
@@ -1274,6 +1275,7 @@ def main(cache_session):
         **({"shuffle": True} if disk_args else {}),
         **common_dataset_args,
     )
+    require_complete_dataset(train_dataset, train_match_ids, "training")
     monitor.event("preparation_complete", device, split="training", samples=len(train_dataset))
     monitor.event("preparation_start", device, split="validation")
     valid_dataset = None if args.final_refit else dataset_class(
@@ -1283,6 +1285,8 @@ def main(cache_session):
         **disk_args,
         **common_dataset_args,
     )
+    if valid_dataset is not None:
+        require_complete_dataset(valid_dataset, valid_match_ids, "validation")
     monitor.event("preparation_complete", device, split="validation",
                   samples=len(valid_dataset) if valid_dataset is not None else 0)
     monitor.event("dataset_loaded", device)
