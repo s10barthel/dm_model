@@ -1072,7 +1072,8 @@ def build_hawkeye_component_tables(
     if component_export.attrs.get("show_outcome_decomposition"):
         from scripts.outcome_decomposition_visualization import attach_saved
         attach_saved(component_tables, component_export.attrs["outcome_decomposition_rows"], situation.situation_id,
-                     component_export.attrs.get("decomposition_components"))
+                     component_export.attrs.get("decomposition_components"),
+                     sources=component_export.attrs.get("decomposition_selection", {}).get("sources"))
     return component_tables
 
 

@@ -81,19 +81,11 @@ def saved_component_inputs(raw, metadata=None):
     return available
 
 
-def select_saved_components(args, raw, metadata, dataset, resolver, *, component_id=None, report=True, allow_empty=False):
+def select_saved_components(args, raw, metadata, dataset, resolver, *, component_id=None, report=True, allow_empty=False,
+                            prepare_decomposition=True):
     selection = resolve_component_selection(args)
     from scripts.outcome_decomposition_visualization import validate_components
     validate_components(args, selection.rendered_components)
-    if getattr(args, "decomposition", False):
-        path = getattr(raw, "attrs", {}).get("outcome_decomposition_path")
-        if path and not raw.attrs.get("outcome_decomposition_rows"):
-            import pandas as pd
-            raw.attrs["outcome_decomposition_rows"] = pd.read_parquet(path).to_dict("records")
-        if raw is None or not getattr(raw, "attrs", {}).get("outcome_decomposition_rows"):
-            raise ValueError("--decomposition requires saved occurrence/severity predictions; use live checkpoint visualization or regenerate component exports with --export-outcome-decomposition.")
-        raw.attrs["show_outcome_decomposition"] = True
-        raw.attrs["decomposition_components"] = selection.rendered_components
     component_id = component_id or metadata.get("run_id")
     available = saved_component_inputs(raw, metadata)
     if {"model_pass_success", "compare_pass_success"} & set(selection.explicit_component_groups):
@@ -109,6 +101,10 @@ def select_saved_components(args, raw, metadata, dataset, resolver, *, component
             available.add("physical_xpass")
     result = filter_component_selection(selection, available, reasons={"physical_xpass": reason} if reason else None,
                                         context=f"Component run {component_id or '<unidentified>'}", allow_empty=allow_empty)
+    if prepare_decomposition:
+        from scripts.outcome_decomposition_visualization import prepare_saved, report_selection
+        effective = prepare_saved(args, raw, metadata, result.rendered_components)
+        report_selection(args, effective)
     return bind_component_selection(args, result, report=report), xpass
 
 

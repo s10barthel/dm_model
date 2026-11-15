@@ -89,7 +89,15 @@ def validate_derived_inputs(component_names: Iterable[str], components: dict[str
 def compute_outcome(scoring: SeriesOrFrame, conceding: SeriesOrFrame) -> SeriesOrFrame:
     """Subtract aligned outcome values, preserving missing operands."""
     scoring, conceding = _align_like([scoring, conceding])
-    return scoring - conceding
+    return _without_decomposition(scoring - conceding)
+
+
+def _without_decomposition(value: SeriesOrFrame) -> SeriesOrFrame:
+    # Pandas arithmetic can inherit the first operand's attrs. A combined value
+    # does not have that source checkpoint's occurrence/severity interpretation.
+    for key in ("outcome_decomposition", "show_outcome_decomposition", "decomposition_action_index"):
+        value.attrs.pop(key, None)
+    return value
 
 
 def compute_pass_score(
@@ -114,7 +122,7 @@ def compute_pass_score(
     )
     if isinstance(pass_score, pd.Series):
         pass_score.name = getattr(pass_success, "name", None)
-    return pass_score
+    return _without_decomposition(pass_score)
 
 
 def _save_gif(images: list[Image.Image], output_path: Path, fps: float) -> None:

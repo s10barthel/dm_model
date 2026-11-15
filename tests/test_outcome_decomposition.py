@@ -195,7 +195,8 @@ def test_inference_export_and_annotations(tmp_path,severity,task):
     model=auxiliary_model(task,model_id=task+'/fixture');model.args.update(configuration(severity,task))
     width=2 if severity=='scalar' else 1+model.args['outcome_decomposition_definition']['severity_distribution']['effective_atoms']
     model.forward=lambda graphs: graphs.x.new_zeros((graphs.num_nodes,2,width))
-    validate_models(SimpleNamespace(decomposition=True),[task+'_success'],{task:model})
+    validate_models(SimpleNamespace(decomposition=True),
+                    [task+'_success', task+'_failure', 'pass_score', 'physical_xpass'], {task:model})
     configure_exports({task:model},True);configure_distribution_exports({task:model},True)
     failure,success=inference_gnn(match,model,device='cpu')
     write_exports(tmp_path,{task:model});write_distribution_exports(tmp_path,{task:model})
@@ -215,6 +216,11 @@ def test_inference_export_and_annotations(tmp_path,severity,task):
     annotate(axis,snapshot,'home',row)
     assert axis.calls and all(' x ' in a[0] for a,kw in axis.calls)
     assert all(kw['xytext']==(0,-3.5) for a,kw in axis.calls)
+    validate_models(SimpleNamespace(decomposition=False), [task+'_success', task+'_failure'], {task:model})
+    plain_failure, plain_success = inference_gnn(match, model, device='cpu')
+    np.testing.assert_array_equal(failure.values, plain_failure.values)
+    np.testing.assert_array_equal(success.values, plain_success.values)
+    assert not plain_success.attrs['show_outcome_decomposition']
 
 
 def test_annotation_scope_and_conflicts():
@@ -222,8 +228,7 @@ def test_annotation_scope_and_conflicts():
     with pytest.raises(ValueError,match='coach'):
         validate_options(SimpleNamespace(decomposition=True,coach_ratings=True))
     for name in ['outcome_success','outcome_failure','pass_score']:
-        with pytest.raises(ValueError,match='individual'):
-            validate_components(SimpleNamespace(decomposition=True),[name])
+        assert validate_components(SimpleNamespace(decomposition=True),[name]) == []
     with pytest.raises(ValueError,match='checkpoint'):
         validate_models(SimpleNamespace(decomposition=True),['outcome_scoring_success'],{})
 

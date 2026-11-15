@@ -111,7 +111,7 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--decomposition", action="store_true", help="Show occurrence x severity below players for individual outcome components.")
+    parser.add_argument("--decomposition", action="store_true", help="Add occurrence x severity labels to individual outcomes from decomposition checkpoints; other selected plots render normally.")
     parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
     add_compare_argument(parser)
@@ -695,7 +695,7 @@ def render_component(
         title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
     from scripts.outcome_decomposition_visualization import annotate as annotate_decomposition
-    annotate_decomposition(ax, snapshot, attacking_prefix, probs, rotate_pitch=rotate_pitch)
+    annotate_decomposition(ax, snapshot, attacking_prefix, probs, rotate_pitch=rotate_pitch, component_name=component_name)
     legend_handles = []
     if player_rings:
         for mode, (color, diameter) in INTENDED_RECEIVER_STYLES.items():
@@ -1202,8 +1202,8 @@ def main() -> None:
     selected_physical_xpass_metric = physical_xpass_metric(args)
     component_selection = finish_inference_selection(
         args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
-    from scripts.outcome_decomposition_visualization import validate_models
-    validate_models(args, component_selection.rendered_components, loaded_models)
+    from scripts.outcome_decomposition_visualization import validate_models, report_selection
+    report_selection(args, validate_models(args, component_selection.rendered_components, loaded_models))
     pass_success_model = loaded_models.get("pass_success")
     pass_success_runtime = configure_xpass_runtime(args, loaded_models, physical_cache_dir)
     validate_pc_xpass_startup(pass_success_runtime)

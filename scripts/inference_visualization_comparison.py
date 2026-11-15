@@ -484,9 +484,11 @@ def run_comparison(args, mod):
         with active_variant(variant, "preflight"):
             validate_pc_xpass_startup(variant.models.get("pass_success", getattr(variant.models, "xpass_runtime", None)))
     names = list(selection.rendered_components)
-    from scripts.outcome_decomposition_visualization import validate_models
+    from scripts.outcome_decomposition_visualization import validate_models, report_selection
     for variant in variants:
-        validate_models(args, names, variant.models)
+        variant.provenance["decomposition_selection"] = validate_models(args, names, variant.models)
+    report_selection(args, {"requested": bool(getattr(args, "decomposition", False)), "variants": {
+        variant.identifier: variant.provenance["decomposition_selection"] for variant in variants}})
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.policy = policy
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,

@@ -390,7 +390,8 @@ def run_comparison(args, mod):
             if kind == "hawkeye" and info.get("inference_mode", args.mode) in {"loc", "freeze"}:
                 dataset = "hawkeye_loc"
             _, xpass = select_saved_components(args, raw, info, dataset, resolve_saved_xpass,
-                                               component_id=identifier, report=False, allow_empty=True)
+                                               component_id=identifier, report=False, allow_empty=True,
+                                               prepare_decomposition=False)
             xpass_settings.append(xpass)
             recorded_masks = info.get("inference_masks") or {}
             requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
@@ -414,6 +415,11 @@ def run_comparison(args, mod):
     selection = bind_component_selection(args, filter_component_selection(
         selection, common or set(), reasons=reasons, context="Compared sources"))
     names = selection.rendered_components
+    from scripts.outcome_decomposition_visualization import prepare_saved, report_selection
+    for variant, raw, info in zip(variants, exports, metadata):
+        variant.provenance["decomposition_selection"] = prepare_saved(args, raw, info, names)
+    report_selection(args, {"requested": bool(getattr(args, "decomposition", False)), "variants": {
+        variant.identifier: variant.provenance["decomposition_selection"] for variant in variants}})
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(kind + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, rendered_components=names,

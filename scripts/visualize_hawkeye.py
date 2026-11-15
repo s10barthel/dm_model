@@ -81,7 +81,7 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--decomposition", action="store_true", help="Show occurrence x severity below players for individual outcome components.")
+    parser.add_argument("--decomposition", action="store_true", help="Add occurrence x severity labels to individual outcomes from decomposition checkpoints; other selected plots render normally.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical distributions when comparing checkpoints; saved-component mode has no model logits.")
     add_compare_argument(parser)
     parser.add_argument("--mode", choices=["standard", "loc", "freeze"], default="standard")
@@ -290,7 +290,7 @@ def render_frame_image(
             color="black",
         )
     from scripts.outcome_decomposition_visualization import annotate as annotate_decomposition
-    annotate_decomposition(ax, snapshot, attacking_prefix, probs)
+    annotate_decomposition(ax, snapshot, attacking_prefix, probs, component_name=component_name)
     add_overlay_annotations(
         ax,
         snapshot,
