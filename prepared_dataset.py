@@ -10,6 +10,7 @@ import math
 import os
 import pickle
 from pathlib import Path
+from types import SimpleNamespace
 import random
 import shutil
 import time
@@ -34,6 +35,7 @@ BASE_PREPARATION_FILES = (
     "packed_graphs.py",
     "dataset.py",
     "models/dataset_config.py",
+    "models/prediction_identity.py",
     "models/node_feature_config.py",
     "models/feature_masks.py",
     "models/input_scaling.py",
@@ -136,7 +138,7 @@ def _prepare_match(task, settings):
     """Only paths/options enter a worker; only compact metadata leaves it."""
     match_id, signatures, path, _ = task
     builder = PreparedActionDataset.__new__(PreparedActionDataset)
-    for name in ("feature_dir", "label_dir", "options", "cache_root", "cache_id"):
+    for name in ("feature_dir", "label_dir", "options", "cache_root", "cache_id", "node_identity_context"):
         setattr(builder, name, settings[name])
     builder.preparation = _preparation_stats(builder.options["graph_validation"])
     builder.skipped_matches = {}
@@ -174,7 +176,7 @@ class PreparedActionDataset(IterableDataset):
 
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
                  buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None,
-                 preparation_workers=1, worker_threads=1, **options):
+                 preparation_workers=1, worker_threads=1, node_identity_context=None, **options):
         super().__init__()
         assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
                                     options.get("pass_height_diagnostic_label_dir"))
@@ -190,6 +192,9 @@ class PreparedActionDataset(IterableDataset):
         if len(set(self.requested_match_ids)) != len(self.requested_match_ids):
             raise ValueError("Duplicate match IDs in dataset split")
         self.feature_dir, self.label_dir = Path(feature_dir).resolve(), Path(label_dir).resolve()
+        self.node_identity_context = dict(node_identity_context) if node_identity_context else None
+        if self.node_identity_context:
+            self.node_identity_context["feature_root"] = str(Path(self.node_identity_context["feature_root"]).resolve())
         bound = inspect.signature(ActionDataset.__init__).bind(
             None, [], feature_dir=str(self.feature_dir), label_dir=str(self.label_dir), **options)
         bound.apply_defaults()
@@ -226,6 +231,8 @@ class PreparedActionDataset(IterableDataset):
         self.identity = {"version": CACHE_VERSION, "code": loaded_code,
                          "feature_dir": str(self.feature_dir), "label_dir": str(self.label_dir),
                          "options": cache_options}
+        if self.node_identity_context:
+            self.identity["node_identity_context"] = self.node_identity_context
         self.cache_id = _digest(self.identity)
         # Library callers retain their caches; CLI training supplies workflow ownership.
         self.cache_session = cache_session or CacheWorkflow(cache_dir, keep=True, kind="library").session_for(cache_dir)
@@ -233,6 +240,11 @@ class PreparedActionDataset(IterableDataset):
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.loaded_match_ids, self.contributing_match_ids = [], []
         self.skipped_matches, self.skipped_rows = {}, {}
+        self.selection_counts = dict(loaded_samples=0, task_eligible_samples=0,
+                                     excluded_by_filter=0, excluded_by_duration=0,
+                                     selected_samples=0, evaluated_samples=0)
+        from datatools.graph_validation import validation_stats
+        self.graph_validation_stats = validation_stats(self.options["graph_validation"])
         self.entries = []
         self.preparation = _preparation_stats(self.options["graph_validation"])
         self.preparation.update(workers=int(preparation_workers), worker_threads=int(worker_threads))
@@ -255,7 +267,7 @@ class PreparedActionDataset(IterableDataset):
         from datatools.worker_runtime import map_tasks
         from datatools.graph_validation import merge_validation_stats
         settings = {name: getattr(self, name) for name in
-                    ("feature_dir", "label_dir", "options", "cache_root", "cache_id")}
+                    ("feature_dir", "label_dir", "options", "cache_root", "cache_id", "node_identity_context")}
         settings.update(session=self.cache_session.descriptor, cache_dir=str(Path(cache_dir).resolve()))
         if int(preparation_workers) == 1 or len(pending) < 2:
             settings["session_object"] = self.cache_session
@@ -278,6 +290,7 @@ class PreparedActionDataset(IterableDataset):
         self.preparation["seconds"] = time.perf_counter() - started
         if progress:
             print(f"Prepared {self.sample_count:,} samples; cache {self.preparation['bytes'] / 1024**3:.2f} GiB; "
+                  f"built {self.preparation['built']}, reused {self.preparation['reused']}; "
                   f"preparation {self.preparation['seconds']:.1f}s.", flush=True)
 
     def _accept_entry(self, match_id, entry):
@@ -286,6 +299,11 @@ class PreparedActionDataset(IterableDataset):
         self.loaded_match_ids.append(match_id)
         for reason, count in entry["skipped_rows"].items():
             self.skipped_rows[reason] = self.skipped_rows.get(reason, 0) + count
+        for key, count in entry["selection_counts"].items():
+            self.selection_counts[key] = self.selection_counts.get(key, 0) + count
+        from datatools.graph_validation import merge_validation_stats
+        self.graph_validation_stats = merge_validation_stats(
+            [self.graph_validation_stats, entry["graph_validation"]], self.options["graph_validation"])
         self.preparation["bytes"] += entry["bytes"]
         if entry["count"]:
             self.contributing_match_ids.append(match_id)
@@ -306,6 +324,10 @@ class PreparedActionDataset(IterableDataset):
             else:
                 paths.extend([root / "metadata.json", root / "matches" / f"{match_id}.parquet",
                               root / f"{match_id}.parquet"])
+        if getattr(self, "node_identity_context", None):
+            from models.prediction_identity import legacy_identity_paths
+            paths.extend(legacy_identity_paths(match_id, self.node_identity_context["feature_root"],
+                                               SimpleNamespace(**self.node_identity_context)))
         return [_signature(p) for p in paths]
 
     def _check_space(self, additional=0):
@@ -323,6 +345,8 @@ class PreparedActionDataset(IterableDataset):
                     or entry["sources"] != signatures or entry["count"] < 0
                     or entry.get("format") != FORMAT or entry.get("version") != CACHE_VERSION
                     or not isinstance(entry["skipped_rows"], dict)
+                    or not isinstance(entry.get("selection_counts"), dict)
+                    or not isinstance(entry.get("graph_validation"), dict)
                     or path.stat().st_size != entry["bytes"]
                     or _file_digest(path) != entry["sha256"]):
                 return None
@@ -351,6 +375,10 @@ class PreparedActionDataset(IterableDataset):
         self.skipped_matches.update(dataset.skipped_matches)
         if match_id not in dataset.loaded_match_ids:
             return None  # Do not persist unreadable/missing matches; retry next run.
+        if self.node_identity_context:
+            from models.prediction_identity import ensure_dataset_node_identities
+            ensure_dataset_node_identities(dataset, self.node_identity_context["feature_root"],
+                                           SimpleNamespace(**self.node_identity_context))
         if self._source_signatures(match_id) != signatures:
             raise RuntimeError(f"Source changed while preparing {match_id}; retry with stable artifacts.")
         for graph in dataset.features:
@@ -361,6 +389,7 @@ class PreparedActionDataset(IterableDataset):
         payload = pack_graphs(dataset.features, dataset.labels)
         self.preparation["packing_seconds"] += time.perf_counter() - packing_started
         count, skipped_rows = len(dataset), dict(dataset.skipped_rows)
+        selection_counts, graph_validation = dict(dataset.selection_counts), dict(dataset.graph_validation_stats)
         del dataset
 
         temporary = path.with_suffix(f".{uuid.uuid4().hex[:12]}.tmp")
@@ -375,6 +404,7 @@ class PreparedActionDataset(IterableDataset):
             entry = {"cache_id": self.cache_id, "match_id": match_id, "sources": signatures,
                      "format": FORMAT, "version": CACHE_VERSION,
                      "count": count, "skipped_rows": skipped_rows,
+                     "selection_counts": selection_counts, "graph_validation": graph_validation,
                      "bytes": temporary.stat().st_size, "sha256": _file_digest(temporary)}
             manifest_tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
             os.replace(temporary, path)

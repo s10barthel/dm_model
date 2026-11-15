@@ -58,6 +58,13 @@ def resolve_legacy_node_ids(graph, label, tracking, actions, *, post_action=Fals
     return ids
 
 
+def legacy_identity_paths(match_id, feature_root, model_args):
+    """Sources used to recover missing IDs; also part of prepared cache identity."""
+    return (TRACKING_PROCESSED_DIR / f"{match_id}.parquet", get_resolved_action_path(
+        match_id, intended_receiver_mode=getattr(model_args, "intended_receiver_mode", None) or "original",
+        root=feature_root, use_carries=bool(getattr(model_args, "use_carries", False))))
+
+
 def ensure_dataset_node_identities(dataset, feature_root, model_args):
     """Backfill only in-memory legacy graphs, reading one source match at a time."""
     missing = defaultdict(list)
@@ -69,10 +76,7 @@ def ensure_dataset_node_identities(dataset, feature_root, model_args):
             continue
         missing[str(graph.evaluation_match_id)].append((graph, label))
     for match_id, rows in missing.items():
-        tracking_path = TRACKING_PROCESSED_DIR / f"{match_id}.parquet"
-        actions_path = get_resolved_action_path(
-            match_id, intended_receiver_mode=getattr(model_args, "intended_receiver_mode", None) or "original",
-            root=feature_root, use_carries=bool(getattr(model_args, "use_carries", False)))
+        tracking_path, actions_path = legacy_identity_paths(match_id, feature_root, model_args)
         if not tracking_path.is_file() or not actions_path.is_file():
             raise FileNotFoundError(f"Semantic comparison of legacy graphs requires {tracking_path} and {actions_path}.")
         tracking, actions = pd.read_parquet(tracking_path), pd.read_parquet(actions_path)

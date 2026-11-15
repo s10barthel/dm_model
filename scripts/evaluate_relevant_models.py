@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from datatools.graph_validation import add_graph_validation_argument, graph_validation_flags, graph_validation_enabled
+from datatools.graph_validation import graph_validation_enabled
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from scripts import learning_curve, model_comparison
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument
@@ -22,6 +22,8 @@ from models.evaluation_context import add_evaluation_arguments, evaluation_selec
 from models.evaluation_membership import (collect_evaluation_membership, confirm_evaluation_membership,
     membership_for_models, EvaluationMembershipCancelled)
 from models.evaluation_data import preflight_evaluation_data
+from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from cache_lifetime import workflow_context
 from models.utils import load_bundle_record
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
 from models.inference_masks import (
@@ -79,7 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
-    add_graph_validation_argument(parser)
+    add_dataset_loading_arguments(parser)
     add_evaluation_arguments(parser)
     add_warning_argument(parser)
     add_outcome_bootstrap_arguments(parser)
@@ -251,7 +253,7 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
-    command.extend(graph_validation_flags(args))
+    command.extend(dataset_loading_flags(args))
     if getattr(args, "feature_run_id", None):
         command.extend(["--feature-run-id", args.feature_run_id])
     if getattr(args, "evaluation_filter", None) is not None:
@@ -412,6 +414,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
               "pc_xpass_id": args.pc_xpass_id, "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
               "evaluation_data": evaluation_data, "series": series, "skipped": skipped}
     manifest_path = output_root / "experiment_manifest.json"
+    args._comparison_manifest_path = manifest_path
     manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     for task, records in series.items():
         task_dir = output_root / task
@@ -421,7 +424,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
                        "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
                        "--learning-curve-rows"]
             add_pc_xpass_options(command, args)
-            command.extend(graph_validation_flags(args))
+            command.extend(dataset_loading_flags(args))
             if args.feature_run_id:
                 command.extend(["--feature-run-id", args.feature_run_id])
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
@@ -708,6 +711,7 @@ def _main(args, policy) -> None:
             record["evaluation_context"] = artifact_metadata.get("evaluation_context", {})
             record["evaluation_membership"] = artifact_metadata.get("evaluation_membership", record["evaluation_membership"])
             record["evaluation_data"] = artifact_metadata.get("evaluation_data", record["evaluation_data"])
+            record["dataset_loading"] = artifact_metadata.get("dataset_loading")
             records.append(record)
             report["entries"].append(record)
             _write_manifest(manifest_path, report)
@@ -738,8 +742,10 @@ def _main(args, policy) -> None:
 def main() -> None:
     args = parse_args()
     policy = ComparisonWarnings(getattr(args, "accept_comparison_warnings", False))
+    workflow = None
     try:
-        _main(args, policy)
+        with workflow_context(args, kind="evaluation_wrapper") as workflow:
+            _main(args, policy)
     except Exception as exc:
         path = getattr(args, "_comparison_manifest_path", None)
         if path is not None:
@@ -750,6 +756,12 @@ def main() -> None:
             print(str(exc), file=sys.stderr)
             raise SystemExit(1) from None
         raise
+    finally:
+        path = getattr(args, "_comparison_manifest_path", None)
+        if workflow is not None and workflow.report is not None and path is not None and path.is_file():
+            report = json.loads(path.read_text(encoding="utf-8"))
+            report["cache_lifetime"] = workflow.report
+            _write_manifest(path, report)
 
 
 if __name__ == "__main__":

@@ -451,13 +451,14 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         pass_height_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "pass_height")
         self.assertIn("--observed-pass-height-stratification", pass_command)
         self.assertEqual(scoring_command[-2:], ["--f1-outcome-threshold", "0.2"])
-        self.assertEqual(pass_height_command, ["test.py", "--graph-validation", "on", "--classification-threshold", "0.5"])
+        self.assertEqual(pass_height_command[-2:], ["--classification-threshold", "0.5"])
+        self.assertEqual(pass_height_command[pass_height_command.index("--graph-validation") + 1], "on")
+        self.assertEqual(pass_height_command[pass_height_command.index("--dataset-loading") + 1], "auto")
 
         opted_out = evaluate_relevant_models.parse_args(["--no-observed-pass-height-stratification"])
-        self.assertEqual(
-            evaluate_relevant_models.add_task_evaluation_options(["test.py"], opted_out, "pass_success"),
-            ["test.py", "--graph-validation", "on", "--classification-threshold", "0.5"],
-        )
+        opted_out_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], opted_out, "pass_success")
+        self.assertNotIn("--observed-pass-height-stratification", opted_out_command)
+        self.assertEqual(opted_out_command[-2:], ["--classification-threshold", "0.5"])
 
     def test_xpass_evaluation_cli_validation_and_forwarding(self) -> None:
         standalone = evaluate_relevant_models.parse_args(

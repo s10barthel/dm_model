@@ -1,4 +1,4 @@
-"""CLI shared by training entry points (kept independent of torch imports)."""
+"""CLI shared by training and evaluation (kept independent of torch imports)."""
 from pathlib import Path
 
 DEFAULT_CACHE_DIR = str(Path(__file__).resolve().parent / "data" / "cache" / "intent_datasets")
@@ -27,7 +27,7 @@ def add_dataset_loading_arguments(parser):
                         help="Native tensor threads per preparation worker (default: 1).")
     parser.add_argument("--dataset-cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--keep-cache", action="store_true", default=False,
-                        help="Retain prepared dataset caches after successful training.")
+                        help="Retain prepared dataset caches after a successful workflow.")
 
 
 def dataset_loading_flags(args):

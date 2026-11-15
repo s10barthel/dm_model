@@ -14,6 +14,9 @@ import torch.nn as nn
 from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
+from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
+from cache_lifetime import evaluation_context
+from prepared_dataset import PreparedActionDataset
 from datatools import config
 from models import utils
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, outcome_bootstrap
@@ -313,9 +316,19 @@ def resolve_lane_survival_context(model_args: argparse.Namespace, selection_args
 
 
 def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: argparse.Namespace) -> None:
-    if not test_dataset.features:
-        return
-    graph = test_dataset.features[0]
+    features = getattr(test_dataset, "features", None)
+    if features is not None:
+        if not features:
+            return
+        graph = features[0]
+    else:
+        if not len(test_dataset):
+            return
+        samples = iter(test_dataset)
+        try:
+            graph, _, _ = next(samples)
+        finally:
+            samples.close()
     actual_node_dim = int(graph.x.shape[1])
     expected_node_dim = int(getattr(model_args, "node_in_dim", actual_node_dim))
     if actual_node_dim != expected_node_dim:
@@ -329,6 +342,41 @@ def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: ar
         raise ValueError(
             f"Test dataset edge feature width {actual_edge_dim} does not match checkpoint edge_in_dim={expected_edge_dim}."
         )
+
+
+def build_test_dataset(args, model_args, match_ids, *, feature_dir, label_dir, feature_root,
+                       dataset_args, cache_session):
+    """Use one preparation policy for direct, comparison and masked evaluation."""
+    resolved = resolve_dataset_loading(args.dataset_loading, model_args.task)
+    # Auxiliary xPass inputs contain nested PyG graphs, which the existing
+    # packed format deliberately does not serialize. Preserve that evaluation
+    # path instead of making auto mode fail partway through preparation.
+    if dataset_args.get("auxiliary_models_args") or dataset_args.get("auxiliary_model_args"):
+        if args.dataset_loading == "disk":
+            raise ValueError("Disk evaluation does not support nested xPass auxiliary graphs; "
+                             "use --dataset-loading memory or auto.")
+        resolved = "memory"
+    needs_node_ids = bool(
+        (args.comparison_rows or args.export_outcome_distributions or args.export_outcome_decomposition)
+        and model_args.gnn_task in {"node_selection", "node_binary"})
+    disk_args = {}
+    if resolved == "disk":
+        disk_args = dict(cache_dir=args.dataset_cache_dir, cache_session=cache_session,
+                         buffer_matches=args.dataset_buffer_matches, shuffle=False,
+                         preparation_workers=args.dataset_preparation_workers,
+                         worker_threads=args.dataset_worker_threads)
+        if needs_node_ids:
+            disk_args["node_identity_context"] = dict(
+                feature_root=str(feature_root), feature_dir=str(feature_dir),
+                intended_receiver_mode=getattr(model_args, "intended_receiver_mode", None),
+                use_carries=bool(getattr(model_args, "use_carries", False)))
+    print(f"Evaluation dataset loading: {resolved}", flush=True)
+    dataset_class = PreparedActionDataset if resolved == "disk" else ActionDataset
+    dataset = dataset_class(match_ids, feature_dir=feature_dir, label_dir=label_dir,
+                            **dataset_args, **disk_args)
+    if needs_node_ids and resolved == "memory":
+        ensure_dataset_node_identities(dataset, feature_root, model_args)
+    return dataset, resolved
 
 
 def _outcome_strata(execution_branch: np.ndarray) -> list[tuple[str, np.ndarray]]:
@@ -808,7 +856,10 @@ def write_model_evaluation_artifacts(
             )
         ]
     columns = list(dict.fromkeys([*existing.columns, *row.columns]))
-    pd.concat([existing.reindex(columns=columns), row.reindex(columns=columns)], ignore_index=True).to_csv(
+    # Let populated columns determine their types; restore all-empty columns
+    # afterward so optional metrics remain part of the summary schema.
+    parts = [frame.dropna(axis=1, how="all") for frame in (existing, row) if len(frame)]
+    pd.concat(parts, ignore_index=True).reindex(columns=columns).to_csv(
         summary_path,
         index=False,
     )
@@ -816,8 +867,7 @@ def write_model_evaluation_artifacts(
 
 def main():
     parser = argparse.ArgumentParser()
-    from datatools.graph_validation import add_graph_validation_argument
-    add_graph_validation_argument(parser)
+    add_dataset_loading_arguments(parser)
     add_pass_height_argument(parser)
     add_evaluation_arguments(parser)
     add_outcome_bootstrap_arguments(parser)
@@ -868,6 +918,11 @@ def main():
             if next_index < len(sys.argv) and sys.argv[next_index].lstrip("-").isdigit():
                 parser.error("--top-pass selects exactly one integer.")
 
+    with evaluation_context(args) as cache_session:
+        _evaluate(args, parser, cache_session)
+
+
+def _evaluate(args, parser, cache_session):
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
@@ -1003,12 +1058,9 @@ def main():
         "outcome_scoring", "outcome_conceding"
     }:
         parser.error("--f1-outcome-threshold requires an outcome_scoring or outcome_conceding checkpoint")
-    test_dataset = ActionDataset(
-        test_match_ids,
-        feature_dir=feature_dir,
-        label_dir=label_dir,
-        **dataset_args,
-    )
+    test_dataset, resolved_loading = build_test_dataset(
+        args, model_args, test_match_ids, feature_dir=feature_dir, label_dir=label_dir,
+        feature_root=feature_root, dataset_args=dataset_args, cache_session=cache_session)
     print_skipped_matches("test", test_dataset)
     if test_dataset.skipped_matches:
         raise ValueError(f"Required evaluation artifacts could not be loaded: {test_dataset.skipped_matches}")
@@ -1017,8 +1069,6 @@ def main():
                          f"(filter={args.evaluation_filter!r}, min_pass_duration={model_args.min_pass_dur}): "
                          f"{test_dataset.selection_counts}.")
     validate_test_dataset_dimensions(test_dataset, model_args)
-    if (args.comparison_rows or args.export_outcome_distributions or args.export_outcome_decomposition) and model_args.gnn_task in {"node_selection", "node_binary"}:
-        ensure_dataset_node_identities(test_dataset, feature_root, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
     #Adjust as needed for your environment.
@@ -1201,6 +1251,12 @@ def main():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         from models.outcome_learning import distribution_identity
         metadata.update(distribution_identity(model_args))
+        metadata["dataset_loading"] = {
+            "requested": args.dataset_loading, "resolved": resolved_loading,
+            "keep_cache": args.keep_cache, "cache_session": args.cache_session,
+            "test": test_dataset.metadata() if resolved_loading == "disk" else {
+                "mode": "memory", "sample_count": len(test_dataset)},
+        }
         metadata["evaluation_context"] = {"training_settings": training_evaluation_settings,
             "filter": args.evaluation_filter,
             "requested_min_pass_duration": args.min_pass_duration,

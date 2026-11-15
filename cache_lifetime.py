@@ -349,6 +349,30 @@ def workflow_context(args, *, kind='wrapper', saved=None):
 
 
 @contextmanager
+def evaluation_context(args):
+    """Attach an evaluator to its wrapper, or own a direct evaluation session."""
+    from dataset_loading import DEFAULT_CACHE_DIR
+    inherited = os.environ.get(ENVIRONMENT_KEY)
+    if inherited:
+        descriptor = json.loads(inherited)
+        descriptor['keep'] = descriptor.get('keep', False) or getattr(args, 'keep_cache', False)
+        workflow = CacheWorkflow.attached(descriptor)
+    else:
+        workflow = CacheWorkflow(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR),
+                                 keep=getattr(args, 'keep_cache', False), kind='evaluation')
+    args.cache_session = workflow.descriptor
+    success = False
+    try:
+        yield workflow.session_for(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR))
+        success = True
+    finally:
+        if inherited:
+            workflow.release()
+        else:
+            record_report(getattr(args, 'evaluation_output_dir', None), workflow.finish(success))
+
+
+@contextmanager
 def training_context(args):
     from dataset_loading import DEFAULT_CACHE_DIR
     inherited = os.environ.get(ENVIRONMENT_KEY)

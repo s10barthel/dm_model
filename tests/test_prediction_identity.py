@@ -82,6 +82,9 @@ def test_legacy_identity_recovery_validates_geometry_after_node_removal(away):
 
 def test_original_possessor_sidecar_survives_feature_and_node_masks():
     source = graph()
+    # This path validates raw inputs, which require complete dense connectivity.
+    source.edge_index = torch.cartesian_prod(torch.arange(source.num_nodes), torch.arange(source.num_nodes)).T
+    source.edge_attr = torch.ones(source.num_nodes ** 2, 2)
     original = source.x.clone()
     options = dict(task="pass_intent", edge_in_dim=2, possessor_aware=False, xy_only=False,
                    extend_features=False, pass_lane_features=False, keeper_aware=True,

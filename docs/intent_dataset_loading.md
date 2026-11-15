@@ -1,5 +1,9 @@
 # Training with a prepared graph cache
 
+Evaluation uses the same cache backend; see
+[Evaluation dataset reuse](evaluation_dataset_cache.md) for loading options,
+cross-command retention and scoring/conceding comparison commands.
+
 Fresh training runs use a prepared disk cache by default for all eight wrapper
 tasks: action/pass/success intent, pass success, pass height, scoring/conceding
 outcomes, and failure receiver. Supported IPW and physical-feature configurations
