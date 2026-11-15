@@ -287,7 +287,27 @@ def test_operational_overrides_preserve_sampling_semantics(sources, overrides):
     with pytest.raises(ValueError, match="sampling semantics|sample order"):
         refit.prepare_refit("pass_intent/source", "new", operational=overrides)
     payload = refit.prepare_refit("pass_intent/source", "new", operational={"dataset_cache_dir": "new_cache"})
-    assert payload["args"]["dataset_cache_dir"] == "new_cache"
+    assert payload["args"]["dataset_cache_dir"] == str(Path("new_cache").resolve())
+
+
+@pytest.mark.parametrize('saved_kind', ['missing', 'legacy', 'custom'])
+def test_refit_cache_root_redirects_old_defaults_and_preserves_custom_paths(sources, tmp_path,
+                                                                        monkeypatch, saved_kind):
+    import dataset_loading
+    legacy, default, custom = (tmp_path / name for name in ('legacy', 'training', 'custom'))
+    monkeypatch.setattr(dataset_loading, 'LEGACY_CACHE_DIR', str(legacy))
+    monkeypatch.setattr(dataset_loading, 'DEFAULT_TRAINING_CACHE_DIR', str(default))
+    settings = {} if saved_kind == 'missing' else {'dataset_cache_dir': str(legacy if saved_kind == 'legacy' else custom)}
+    create, _ = sources
+    directory, source_args, _ = create('pass_intent/source')
+    source_args.update(settings)
+    (directory / 'args.json').write_text(json.dumps(source_args))
+    payload = refit.prepare_refit('pass_intent/source', 'new')
+    assert payload['args']['dataset_cache_dir'] == str(custom if saved_kind == 'custom' else default)
+    payload = refit.prepare_refit('pass_intent/source', 'override', operational={'dataset_cache_dir': str(legacy)})
+    assert payload['args']['dataset_cache_dir'] == str(legacy)
+    assert payload['args']['_dataset_cache_dir_explicit']
+    assert json.loads((directory / 'args.json').read_text()) == source_args
 
 
 def test_completed_stage_is_immutable_and_cannot_replace_later_delivery(tmp_path):

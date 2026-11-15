@@ -153,17 +153,16 @@ triggering cleanup independently for each verification dataset.
 
 ## 5. Handle evaluation and existing ownership records
 
-Evaluation uses the same cache root and ownership machinery. Keep evaluation's
-current lifecycle in this change, but make the lifetime policy explicit so its
-completion cleanup cannot sweep entries retained under the new training policy.
-An active evaluator must also protect its entries from training-start pruning.
-Outside such protection or explicit retention, managed obsolete entries in the
-shared root are eligible for training-start pruning.
+Update, 16 November 2026: training and evaluation now default to separate roots
+and both prune at each model's startup. See
+[cache root separation](cache_root_separation_plan.md). Each purpose retains
+completed entries until its next model starts. Existing shared-root protections
+remain available when the user explicitly selects a shared custom root.
 
-Existing tracked training entries, including the two configuration directories
-currently retained by failed wrapper sessions, enter the new startup policy.
-Old failed/completed session references alone must not protect them. Preserve
-conservative protection for genuinely live legacy sessions until they exit.
+The legacy `data/cache/intent_datasets` root is left untouched by the new defaults.
+Its managed entries become eligible for startup pruning only when that root is
+explicitly selected. Historical failed/completed sessions do not protect entries;
+genuinely live readers, persistent retention, and untracked files do.
 Do not delete anything merely by importing code, opening the database, or
 running the schema migration; pruning requires a validated model start.
 

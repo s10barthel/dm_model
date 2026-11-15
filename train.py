@@ -18,7 +18,8 @@ from torch.utils.data import WeightedRandomSampler
 from torch_geometric.data import Batch
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
-from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading, saved_dataset_loading
+from dataset_loading import (add_dataset_loading_arguments, resolve_dataset_loading, saved_dataset_loading,
+                             configure_dataset_cache)
 from cache_lifetime import training_context
 from ipw_options import add_ipw_arguments, restore_ipw_defaults
 from ipw_preparation import IPWPreparer
@@ -527,6 +528,7 @@ pc_versions.add_selection_argument(parser)
 add_feature_selection_arguments(parser)
 resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
+resume_probe.add_argument("--dataset-cache-dir")
 resume_probe.add_argument("--keep-cache", action="store_true")
 add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "light", "off"), default="off")
@@ -572,6 +574,11 @@ def parse_training_args():
         args.graph_validation = resume_options.graph_validation
         args.batch_loader = restored_batch_loader(resume_checkpoint["args"], resume_options.batch_loader)
         args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
+        saved_cache_settings = dict(vars(args))
+        args._dataset_cache_dir_explicit = resume_options.dataset_cache_dir is not None
+        if args._dataset_cache_dir_explicit:
+            args.dataset_cache_dir = resume_options.dataset_cache_dir
+        configure_dataset_cache(args, "training", saved=saved_cache_settings)
         for name in ("dataset_preparation_workers", "dataset_worker_threads", "interim_metrics"):
             override = getattr(resume_options, name)
             if override is not None:
@@ -583,10 +590,22 @@ def parse_training_args():
         refit_options = refit_probe.parse_args()
         args = argparse.Namespace(**load_refit_config(refit_options.refit_config))
         args.graph_validation = refit_options.graph_validation
+        configure_dataset_cache(args, "training", saved=dict(vars(args)))
     else:
         args, _ = parser.parse_known_args()
         if args.resume_run_id:
             parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+        saved_cache_settings = None
+        if args.cont:
+            continued_id = args.run_id or (f"{args.trial:02d}" if args.trial is not None else None)
+            if continued_id:
+                continued_root = get_model_run_root(args.task, continued_id)
+                if args.artifact_stage:
+                    continued_root = continued_root / args.artifact_stage
+                saved_path = continued_root / "args.json"
+                if saved_path.is_file():
+                    saved_cache_settings = json.loads(saved_path.read_text(encoding="utf-8"))
+        configure_dataset_cache(args, "training", saved=saved_cache_settings)
     if not hasattr(args, "batch_loader"):
         args.batch_loader = "auto"
     normalize_feature_settings(vars(args))

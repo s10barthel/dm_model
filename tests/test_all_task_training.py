@@ -18,6 +18,8 @@ from test_goal_context import source
 @pytest.mark.parametrize("architecture", ["gat", "relationship-attention"])
 def test_fresh_cli_all_tasks_default_to_disk(tmp_path, monkeypatch, task, architecture, ipw_model_id=None, keep_cache=False):
     import project_config as pc
+    import dataset_loading
+    monkeypatch.setattr(dataset_loading, 'DEFAULT_TRAINING_CACHE_DIR', str(tmp_path / 'cache'))
     features, labels = tmp_path / "features", tmp_path / "labels"
     if task.startswith("outcome_"):
         labels = tmp_path / "labels" / "base" / "labels"
@@ -42,7 +44,7 @@ def test_fresh_cli_all_tasks_default_to_disk(tmp_path, monkeypatch, task, archit
     monkeypatch.setattr(pc, "get_model_run_root", lambda task, run_id: tmp_path / "saved" / task / run_id)
     command = ["train.py", "--task", task, "--model", architecture, "--device", "cpu",
         "--feature_dir", str(features), "--label_dir", str(labels), "--run-id", "verification",
-        "--dataset-cache-dir", str(tmp_path / "cache"), "--n_epochs", "1", "--batch_size", "2",
+        "--n_epochs", "1", "--batch_size", "2",
         "--node_emb_dim", "8", "--graph_emb_dim", "8", "--gnn_heads", "2",
         "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-goal-nodes",
         "--no-position-direction-edge-features", "--no-relative-velocity-edge-features",

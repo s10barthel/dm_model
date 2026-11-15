@@ -26,7 +26,7 @@ import psutil
 import torch
 
 from dataset import ActionDataset
-from dataset_loading import DEFAULT_CACHE_DIR
+from dataset_loading import DEFAULT_TRAINING_CACHE_DIR
 from models.dataset_config import build_action_dataset_kwargs
 from prepared_dataset import PreparedActionDataset
 
@@ -215,7 +215,7 @@ def verify_reuse(metadata, cache_dir, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-metadata", type=Path, required=True)
-    parser.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
+    parser.add_argument("--cache-dir", default=DEFAULT_TRAINING_CACHE_DIR)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--train-one-epoch", action="store_true")
     args = parser.parse_args()

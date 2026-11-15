@@ -9,7 +9,7 @@ from pathlib import Path
 
 from project_config import (SAVED_DIR, VALIDATION_PROTOCOL_SHARED, load_feature_run_metadata,
                             resolve_artifact_split, split_selector, load_model_splits)
-from dataset_loading import resolve_dataset_loading, saved_dataset_loading
+from dataset_loading import resolve_dataset_loading, saved_dataset_loading, resolve_dataset_cache_dir
 from models.node_feature_config import resolve_goal_poss_dist, resolve_speed_aware
 
 HISTORY_VERSION = 1
@@ -201,6 +201,10 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
         raise ValueError("Refit permits operational overrides only.")
     args["graph_validation"] = True
     args.update(overrides)
+    args["dataset_cache_dir"] = resolve_dataset_cache_dir(
+        "training", requested=overrides.get("dataset_cache_dir"), saved=settings.get("dataset_cache_dir"))
+    args["_dataset_cache_dir_explicit"] = "dataset_cache_dir" in overrides
+    args["cache_purpose"] = "training"
     target_loading = resolve_dataset_loading(args.get("dataset_loading", "auto"), task, dependency_id)
     if target_loading != source_loading:
         raise ValueError("Refit data-loading overrides cannot change memory/disk sampling semantics.")

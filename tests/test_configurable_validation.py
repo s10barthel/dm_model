@@ -110,6 +110,7 @@ def test_shared_validation_identity_mismatch_is_rejected(monkeypatch):
     ("expanding", [40], True)])
 def test_wrapper_stage_order_dependencies_and_refit_source(tmp_path, monkeypatch, mode, counts, refit):
     args = wrapper.parse_args(["--refit-source-model-id", "pass_intent/source"])
+    args.dataset_cache_dir = str(tmp_path / 'cache')
     args.refit_source_model_id = []
     args.final_refit = refit
     args.validation_mode = mode

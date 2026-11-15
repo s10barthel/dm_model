@@ -605,14 +605,22 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
     # Exercise a legacy argument record and an explicit runtime override through
     # the real entry point, while preserving the saved optimizer/RNG state.
     if monitoring == "light":
+        import dataset_loading
+        monkeypatch.setattr(dataset_loading, 'LEGACY_CACHE_DIR', str(tmp_path / 'legacy'))
+        monkeypatch.setattr(dataset_loading, 'DEFAULT_TRAINING_CACHE_DIR', str(tmp_path / 'redirected'))
+        checkpoint['args']['dataset_cache_dir'] = dataset_loading.LEGACY_CACHE_DIR
         checkpoint["args"].pop("batch_loader")
         atomic_torch_save(checkpoint, checkpoint_path)
     override = ["--batch-loader", "pyg"] if monitoring == "off" else []
+    expected_cache = tmp_path / ('redirected' if monitoring == 'light' else 'relocated')
+    if monitoring != 'light':
+        override.extend(['--dataset-cache-dir', str(expected_cache)])
     monkeypatch.setattr(sys, "argv", ["train.py", "--resume-checkpoint", str(checkpoint_path),
                                     "--monitoring", monitoring, "--graph-validation", "off"] + override)
     runpy.run_path(str(entry), run_name="__main__")
     resumed = load_checkpoint(checkpoint_path)
     assert resumed["finished"] and resumed["metadata"]["last_epoch"] == 5
+    assert resumed['args']['dataset_cache_dir'] == str(expected_cache)
     assert resumed["args"]["batch_loader"] == ("auto" if monitoring == "on" else "pyg")
     assert all(split["effective"] == "pyg" for split in resumed["metadata"]["batch_loaders"].values())
     assert resumed["metadata"]["lr"] == .001  # plateau rolled back best model and optimizer

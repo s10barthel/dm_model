@@ -23,7 +23,7 @@ from tqdm import tqdm
 from dataset import ActionDataset
 from packed_graphs import FORMAT, VERSION, pack_graphs, decode_payload, validate_payload
 from project_config import assert_feature_paths_usable
-from dataset_loading import DEFAULT_CACHE_DIR, PREPARED_TASKS
+from dataset_loading import DEFAULT_TRAINING_CACHE_DIR, PREPARED_TASKS
 from models.pass_height import positive_height, relabel_height
 from cache_lifetime import CacheWorkflow
 from training_state import capture_rng, restore_rng
@@ -174,7 +174,7 @@ LOADED_PREPROCESSING_FINGERPRINT = loaded_preprocessing_fingerprint()
 class PreparedDatasetPlan:
     """Read-only preparation identity and complete per-match paths for reservation."""
 
-    def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
+    def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_TRAINING_CACHE_DIR,
                  node_identity_context=None, **options):
         assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
                                     options.get("pass_height_diagnostic_label_dir"))
@@ -276,7 +276,7 @@ class PreparedDatasetPlan:
 class PreparedActionDataset(IterableDataset):
     """Only metadata survives preparation; at most one group is loaded per iterator."""
 
-    def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
+    def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_TRAINING_CACHE_DIR,
                  buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None,
                  preparation_workers=1, worker_threads=1, node_identity_context=None,
                  preparation_plan=None, **options):

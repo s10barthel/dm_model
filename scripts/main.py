@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools.graph_validation import graph_validation_flags
-from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags, default_cache_dir
 from models.inference_masks import add_inference_mask_arguments, resolve_inference_mask_configurations
 from project_config import (
     add_split_arguments,
@@ -120,7 +120,10 @@ def parse_args() -> argparse.Namespace:
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
     add_inference_mask_arguments(parser)
-    add_dataset_loading_arguments(parser)
+    add_dataset_loading_arguments(parser, cache_options=("--dataset-cache-dir", "--training-dataset-cache-dir"))
+    from dataset_loading import DEFAULT_EVALUATION_CACHE_DIR
+    parser.add_argument("--evaluation-dataset-cache-dir", default=DEFAULT_EVALUATION_CACHE_DIR,
+                        help="Prepared cache root for evaluation only.")
     parser.add_argument(
         "--target-family",
         choices=["goal", "xg", "xt", "goal_distance", "epv", "progression"],
@@ -402,6 +405,10 @@ def parse_args() -> argparse.Namespace:
             "--bundle-id is required when --skip-train is set but downstream evaluation or inference stages are enabled."
         )
 
+    from dataset_loading import configure_dataset_cache, resolve_dataset_cache_dir
+    configure_dataset_cache(args, "training")
+    args.evaluation_dataset_cache_dir = resolve_dataset_cache_dir(
+        "evaluation", requested=args.evaluation_dataset_cache_dir)
     return args
 
 
@@ -715,6 +722,8 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             evaluate_command.extend(["--success-intent-model-id", args.success_intent_model_id])
         if getattr(args, "pass_height_threshold", None) is not None:
             evaluate_command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
+        evaluate_command.extend(["--dataset-cache-dir", str(
+            getattr(args, "evaluation_dataset_cache_dir", None) or default_cache_dir("evaluation"))])
         evaluate_command.extend(graph_validation_flags(args))
         commands.append(evaluate_command)
 

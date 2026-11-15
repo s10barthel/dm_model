@@ -88,8 +88,8 @@ These options work in `train.py`, `scripts/train_relevant_models.py`, and
 | `--dataset-buffer-matches` | `4` | Number of prepared matches mixed during training. Must be positive. Validation always reads one match at a time. |
 | `--dataset-preparation-workers` | `1` | CPU processes preparing independent matches before training. See the worker-count benchmark for timing and memory guidance. |
 | `--dataset-worker-threads` | `1` | Native tensor/BLAS threads per spawned preparation worker; the single-process training thread setting is preserved. |
-| `--dataset-cache-dir` | `data/cache/intent_datasets` under the repository | Shared cache location; the historical directory name remains for compatibility. A different drive can be used. |
-| `--keep-cache` | Disabled | Persistently protect used prepared entries from pruning by later models. Default training retention lasts until the next model starts. |
+| `--dataset-cache-dir` | Repository-root `cache/training` | Exact prepared training root. Evaluation independently defaults to `cache/evaluation`. A different drive can be used. |
+| `--keep-cache` | Disabled | Persistently protect used prepared entries from pruning by later models. Default retention lasts until the next model of the same purpose starts. |
 
 Add these options to an existing training command; feature regeneration is not
 needed. Disk loading supports inverse-propensity weighting. Preparation releases
@@ -184,9 +184,24 @@ ownership database or importing code performs no deletion. Existing tracked cach
 become eligible only at a future validated model start. Refactoring the prepared
 loader changes its preprocessing fingerprint and can require one rebuild.
 
-Evaluation retains its separate workflow-completion cleanup policy, but cannot
-sweep entries retained under the training policy. Training-start pruning also
-honors live evaluation readers. See [evaluation dataset reuse](evaluation_dataset_cache.md).
+Evaluation uses the same per-model startup pruning and exit retention policy,
+with its own default root, `cache/evaluation`. Each purpose has independent
+ownership records, locks, and retention. Training defaults to `cache/training`.
+Explicitly selecting the same custom root restores shared-root reader and
+retention protection. Separate directories still share the drive's free space.
+See [evaluation dataset reuse](evaluation_dataset_cache.md).
+
+Fresh runs do not scan or move the old `data/cache/intent_datasets` directory.
+Resume, continuation, and refit redirect a missing or saved legacy-default path
+to `cache/training`, preserving saved custom roots. `--dataset-cache-dir` can
+override the location during resume; an explicit root always wins, including an
+explicit legacy path. Old checkpoints and old cache ownership databases are not
+rewritten. New roots may need a rebuild while old cache data still occupies disk.
+
+In `scripts/main.py`, `--training-dataset-cache-dir` aliases the existing
+training-only `--dataset-cache-dir`. `--evaluation-dataset-cache-dir` controls
+the evaluation stage independently. Other pipeline loading/retention flags keep
+their existing training scope.
 
 Workflow manifests under `.sessions/` and `cache_lifetime` in model metadata
 record created/reused entries, startup reclaimed bytes and entries, retained

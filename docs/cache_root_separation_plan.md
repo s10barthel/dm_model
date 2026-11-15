@@ -1,6 +1,6 @@
 # Separate training and evaluation cache roots
 
-Status: implementation plan, 15 November 2026. Runtime code and caches are unchanged.
+Status: implemented and verified, 16 November 2026.
 
 ## Proposed layout and behavior
 
@@ -18,28 +18,23 @@ training root. Evaluation cleanup scans only its resolved evaluation root.
 `--keep-cache` protects entries within the root where they are used; it does not
 protect or retain entries in the other root.
 
-Preserve the current lifetime policies: training retains entries after each
-model and prunes obsolete unused entries at the next model's startup; evaluation
-cleans eligible entries after successful evaluation-workflow completion. Failed
-evaluations retain completed entries. Explicit retention and live-reader
-protection continue to apply within each root.
+Both purposes use the same lifetime policy: retain completed entries after each
+model, and prune obsolete unused entries at the next model's startup before
+replacement space checks or writes. This applies within each multi-model wrapper
+as well. Explicit retention and live-reader protection apply within each root.
 
 Separate roots isolate cleanup, ownership, and retention. They still consume the
 same drive's free space: a large retained evaluation cache can leave insufficient
 space for training. Training will no longer reclaim that evaluation data. The
 existing reserve check remains applicable to both roots.
 
-## Decisions to settle before runtime implementation
+## User decisions
 
-The recommendations below are proposals, not assumed user answers. The plan can
-be reviewed now; implementation of the affected behavior waits for explicit
-answers if these decisions remain open.
-
-| Decision | Options | Recommendation |
-| --- | --- | --- |
-| Existing shared cache | Start with new roots and leave `data/cache/intent_datasets` untouched; or build a separate, controlled migration tool. | Start with new roots. This avoids moving active files or misclassifying opaque cache identities and ownership records. Budget for rebuilding; old data continues occupying disk until separately handled. |
-| Old checkpoint/refit paths | Redirect missing or saved legacy-default paths to the new training default; or preserve every saved path until explicitly overridden. | Redirect the known legacy default. Otherwise old resumes silently keep using shared storage. Preserve saved custom paths and let an explicit runtime override win. |
-| Evaluation lifetime | Keep workflow-completion cleanup; or introduce training-style pruning at each evaluation model's startup. | Keep the current evaluation policy for this change. It supports reuse across compared checkpoints. A different evaluation retention policy can be considered separately. |
+1. Start with new roots and leave the existing shared cache untouched; no migration.
+2. Redirect missing or saved legacy-default training paths on resume/refit to the
+   new training default. Preserve saved custom paths and honor explicit overrides.
+3. Apply training's per-model startup pruning and exit retention to evaluation
+   as well, including each model/configuration inside an evaluation wrapper.
 
 The proposed directory names follow the user's suggestion literally: repository
 `cache/training` and `cache/evaluation`, rather than `data/cache/...`.
@@ -94,7 +89,7 @@ The current training resume path restores `dataset_cache_dir` from checkpoint
 arguments, while refits copy source settings. Merely changing parser defaults
 would not affect these paths.
 
-If the recommended legacy-path decision is accepted:
+The agreed legacy-path handling is:
 
 - Normalize missing and saved legacy-default roots to `cache/training` for
   resumes, continuation, source refits, and final refits.
@@ -125,7 +120,8 @@ evaluation, and wrapper contexts with the appropriate named defaults.
 Record cache purpose in descriptors/reports and preserve parent attribution
 within a purpose. An evaluator must not attach to a training wrapper's ownership
 merely because `DM_MODEL_DATASET_CACHE_SESSION` is present; give it its own
-evaluation owner. Evaluation children still attach to their evaluation wrapper.
+evaluation owner. Evaluation children have separate live claims and retain
+wrapper attribution.
 Handle legacy descriptors using their existing kind and explicit root without
 silently creating cross-purpose ownership.
 
@@ -148,7 +144,7 @@ or promise reuse across a code change to avoid a rebuild.
   opt-in, and how `--keep-cache` can increase disk use independently in each root.
 - Print and record the resolved absolute root and purpose, so unexpected path
   inheritance is visible in startup logs and reports.
-- If the recommended fresh-root rollout is accepted, do not move, copy, prune,
+- Under the agreed fresh-root rollout, do not move, copy, prune,
   or delete the old shared cache. There is no silent fallback to it on a miss.
   Reclaiming its disk space or migrating its entries requires a separate explicit
   action once no process uses it.
@@ -166,7 +162,7 @@ resume, and refit tests to verify:
 1. Fresh direct and wrapper invocations select the correct root from any working
    directory; each root gets separate ownership, lock, and report files.
 2. Training startup removes obsolete training entries while preserving evaluation
-   entries and its database. Successful evaluation cleanup preserves training
+   entries and its database. Evaluation startup pruning preserves training
    entries and its database.
 3. `--keep-cache` persists protection within its root. Pins, failed workflows,
    and active readers in one default root do not affect the other root's policy.
@@ -175,7 +171,7 @@ resume, and refit tests to verify:
 5. Direct CLI overrides remain exact paths. Deliberate shared overrides retain
    the existing shared-root safety rules.
 6. Resume/refit resolution covers missing paths, legacy-default paths, saved
-   custom paths, and explicit overrides according to the chosen policy. Actual
+   custom paths, and explicit overrides according to the agreed policy. Actual
    resumed training remains numerically equivalent.
 7. Evaluation ignores a checkpoint's training-cache location; inherited training
    ownership cannot couple it back to the training root.
@@ -188,3 +184,21 @@ resume, and refit tests to verify:
 Run focused root-selection/isolation tests, then the affected existing training,
 evaluation, resume, refit, and pipeline checks. No real cache movement or cleanup
 is part of implementing or testing this plan.
+
+## Verified implementation
+
+The agreed defaults, saved-path resolution, pipeline overrides, read-only legacy
+liveness checks, and per-model evaluation lifecycle are implemented. Both cache
+purposes use the same startup pruning and exit retention machinery. Evaluation
+children have fresh claims rather than workflow-long ownership.
+
+Validation covered 505 distinct passing test cases across cache roots/lifetimes,
+prepared datasets, real evaluation and training, resume equivalence with relocated
+caches, refits, configurable validation, pipeline forwarding, graph validation,
+temporal splits, xT versioning, and inference masks. Pipeline tests also passed
+46 subtests. One file-symlink test was skipped because this Windows account cannot
+create file symlinks. `git diff --check` passed.
+
+No migration or cleanup was run against the legacy shared cache. Future default
+runs build in the new roots; old shared data continues occupying disk space until
+separately handled. Explicit custom roots and persistent retention remain honored.

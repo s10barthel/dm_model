@@ -1963,9 +1963,10 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--dataset-loading {auto,memory,disk}`: fresh runs default to prepared disk loading for all eight wrapper tasks, including IPW configurations. `memory` explicitly loads the full dataset into RAM. Training buffers four matches by default; validation loads one.
 - `--batch-loader {auto,pyg}`: defaults to direct packed batching for prepared disk datasets, with PyG fallback for unsupported schemas. Full monitoring selects PyG; memory datasets use PyG.
 - `--monitoring {off,light,on}`: defaults to `off`. `light` retains resource sampling and logs every 50 batches; `on` enables full telemetry and collation diagnostics.
-- Training retains prepared graph/label caches after each model finishes. At each next model's startup, compatible entries are reused and obsolete unused managed entries are deleted before preparing replacements, including inside multi-model workflows. Historical failures do not block cleanup.
+- Training uses repository-root `cache/training`; evaluation uses `cache/evaluation`, with independent ownership and cleanup. Both retain prepared graph/label caches after each model finishes. At each next model's startup within that purpose, compatible entries are reused and obsolete unused managed entries are deleted before preparing replacements, including inside multi-model workflows. Historical failures do not block cleanup.
+- `--dataset-cache-dir PATH`: exact cache root for a direct training or evaluation command. The combined pipeline also accepts `--training-dataset-cache-dir` as a training alias and `--evaluation-dataset-cache-dir` for evaluation. Old resumes/refits redirect the saved legacy default to the new training root while preserving custom paths. The legacy shared cache is left untouched.
 - `--keep-cache`: persistently protect used prepared entries from later model-start pruning. Active readers, pre-existing entries, and library retention also protect caches. See [prepared dataset loading](docs/intent_dataset_loading.md).
-- `--resume-id <task/run_id[/stage]>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--keep-cache`, `--batch-loader`, `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
+- `--resume-id <task/run_id[/stage]>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--dataset-cache-dir`, `--keep-cache`, `--batch-loader`, `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
 - `--train-count <int>`: optional assertion of the feature run's exact development match count, including validation. Mutually exclusive with `--train-split`.
@@ -3223,7 +3224,7 @@ input-feature signatures in model and bundle metadata.
 
 Prepared training caches use lossless packed CPU tensors with lazy graph
 reconstruction for all eight wrapper tasks. Version 1 caches rebuild once.
-Training caches remain until the next model starts; `--keep-cache` persistently
+Training and evaluation caches remain in their separate roots until the next model of that purpose starts; `--keep-cache` persistently
 protects entries from that startup cleanup. See
 [dataset loading and cache lifetime](docs/intent_dataset_loading.md).
 

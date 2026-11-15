@@ -54,6 +54,7 @@ def test_generator_publishes_unique_versions_and_keeps_partial_builds_unselectab
     events.mkdir()
     (events / "m.csv").write_text("event", encoding="utf-8")
     args = SimpleNamespace(version="v1", fit_only=False, match_id=None, limit=None,
+        log_progression=False,
         reuse_source_grid=False, source_xt_version=None, source_grid_l=12, source_grid_w=8,
         use_interaction=False, use_nonlinear=None)
     monkeypatch.setattr(generate_xt, "ROOT", tmp_path)

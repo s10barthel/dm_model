@@ -174,7 +174,7 @@ def test_cached_legacy_node_ids_track_recovery_sources(tmp_path, outcome_artifac
 
 
 @pytest.mark.parametrize("keep", [False, True])
-def test_evaluation_children_share_owner_and_retention(tmp_path, outcome_artifacts, keep):
+def test_evaluation_children_have_separate_claims_and_retain_cache(tmp_path, outcome_artifacts, keep):
     args = cli(tmp_path)
     args.keep_cache = keep
     with workflow_context(args, kind="evaluation_wrapper") as owner:
@@ -184,7 +184,8 @@ def test_evaluation_children_share_owner_and_retention(tmp_path, outcome_artifac
         with evaluation_context(args) as session:
             second = build(args, dict(outcome_artifacts, task="outcome_conceding"), session=session)
         assert second.preparation["reused"] == 2
-    assert all(Path(e["path"]).is_file() == keep for e in first.entries)
+    assert all(Path(e["path"]).is_file() for e in first.entries)
+    assert len(owner.report["model_starts"]) == 2
     assert owner.report["status"] == "completed"
 
 
@@ -259,7 +260,9 @@ def test_real_inference_and_comparison_rows_match_memory(tmp_path, outcome_artif
         np.testing.assert_equal(memory_result, disk_result)
 
 
-def test_direct_cli_writes_dataset_metadata_and_finishes_cache(tmp_path, outcome_artifacts, monkeypatch):
+@pytest.mark.parametrize('use_default_root', [False, True])
+def test_direct_cli_writes_dataset_metadata_and_finishes_cache(tmp_path, outcome_artifacts, monkeypatch,
+                                                              use_default_root):
     import numpy as np
     from models.gnn import GNN
     from test_masked_evaluation_smoke import model_args
@@ -284,18 +287,45 @@ def test_direct_cli_writes_dataset_metadata_and_finishes_cache(tmp_path, outcome
         {"manifest_id": "fixture"}, "fixture", np.asarray(["m0"]), {"checks": [], "status": "verified"}))
     monkeypatch.setattr(evaluation, "EVALUATION_RUNS_DIR", tmp_path / "summary")
     output = tmp_path / "evaluation"
-    monkeypatch.setattr(sys, "argv", ["test.py", "--model_id", "outcome_scoring/fixture", "--device", "cpu",
-        "--evaluation-output-dir", str(output), "--dataset-cache-dir", str(tmp_path / "cache"),
-        "--comparison-rows", "--outcome-bootstrap-resamples", "0"])
+    import dataset_loading
+    monkeypatch.setattr(dataset_loading, 'DEFAULT_EVALUATION_CACHE_DIR', str(tmp_path / 'cache'))
+    command = ["test.py", "--model_id", "outcome_scoring/fixture", "--device", "cpu",
+        "--evaluation-output-dir", str(output), "--comparison-rows", "--outcome-bootstrap-resamples", "0"]
+    if not use_default_root:
+        command.extend(['--dataset-cache-dir', str(tmp_path / 'cache')])
+    monkeypatch.setattr(sys, "argv", command)
     evaluation.main()
     metadata = json.loads((output / "metadata.json").read_text())
     assert metadata["dataset_loading"]["resolved"] == "disk"
     assert metadata["dataset_loading"]["test"]["preparation"]["built"] == 1
     assert metadata["evaluation_context"]["selection_counts"]["evaluated_samples"] > 0
     assert metadata["cache_lifetime"]["status"] == "completed"
-    assert metadata["cache_lifetime"]["roots"][0]["deleted_entries"] == 1
-    assert not list((tmp_path / "cache").rglob("*.pt"))
+    assert metadata["cache_lifetime"]["roots"][0]["deleted_entries"] == 0
+    assert metadata["cache_lifetime"]["roots"][0]["model_start"]["purpose"] == "evaluation"
+    assert list((tmp_path / "cache").rglob("*.pt"))
     assert (output / "learning_curve_predictions.csv").is_file()
+
+
+def test_evaluation_prunes_per_model_before_writing_replacements(tmp_path, outcome_artifacts, monkeypatch):
+    args = cli(tmp_path)
+    args.keep_cache = False
+    previous = set()
+    with workflow_context(args, kind='evaluation_wrapper') as wrapper_owner:
+        for selected_filter in ('pass', 'pass', None):
+            with evaluation_context(args) as session:
+                if selected_filter is None:
+                    original = prepared.PreparedActionDataset._check_space
+                    def check_space(self, *a, **kw):
+                        assert all(not path.exists() for path in previous)
+                        return original(self, *a, **kw)
+                    monkeypatch.setattr(prepared.PreparedActionDataset, '_check_space', check_space)
+                dataset = build(args, dict(outcome_artifacts, evaluation_filter=selected_filter), session=session)
+                if previous and selected_filter == 'pass':
+                    assert dataset.preparation['reused'] == 2
+                previous = {Path(e['path']) for e in dataset.entries}
+            assert all(path.exists() for path in previous)
+    assert all(path.exists() for path in previous)
+    assert [r['deleted_entries'] for r in wrapper_owner.report['model_starts']] == [0, 0, 2]
 
 
 def test_auxiliary_graph_evaluation_keeps_memory_path(tmp_path, outcome_artifacts, monkeypatch):

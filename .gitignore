@@ -4,6 +4,7 @@ hawkeye_data
 skillcorner_data
 benchmark/
 data/
+/cache/
 validation/**
 !validation/**/
 !validation/**/*.py
@@ -137,6 +138,7 @@ _vendor/defcon/saved
 
 !tests/test_all_task_training.py
 !tests/test_cache_lifetime.py
+!tests/test_cache_roots.py
 !tests/test_resource_monitor.py
 
 !tests/test_packed_graphs.py

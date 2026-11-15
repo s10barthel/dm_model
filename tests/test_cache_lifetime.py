@@ -348,7 +348,7 @@ def test_wrapper_aggregates_model_starts_from_another_cache_root(tmp_path):
         with training_context(child) as session:
             session.start_model([])
     assert len(wrapper.report['model_starts']) == 1
-    assert wrapper.report['model_starts'][0]['root'] == str(child.dataset_cache_dir.resolve())
+    assert wrapper.report['model_starts'][0]['root'] == str(Path(child.dataset_cache_dir).resolve())
     assert wrapper.report['model_start_totals']['deleted_bytes'] == 0
 
 

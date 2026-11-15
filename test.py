@@ -16,7 +16,7 @@ from torch_geometric.loader import DataLoader
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
 from cache_lifetime import evaluation_context
-from prepared_dataset import PreparedActionDataset
+from prepared_dataset import PreparedActionDataset, PreparedDatasetPlan
 from datatools import config
 from models import utils
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, outcome_bootstrap
@@ -347,6 +347,7 @@ def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: ar
 def build_test_dataset(args, model_args, match_ids, *, feature_dir, label_dir, feature_root,
                        dataset_args, cache_session):
     """Use one preparation policy for direct, comparison and masked evaluation."""
+    match_ids = list(match_ids)
     resolved = resolve_dataset_loading(args.dataset_loading, model_args.task)
     # Auxiliary xPass inputs contain nested PyG graphs, which the existing
     # packed format deliberately does not serialize. Preserve that evaluation
@@ -370,6 +371,18 @@ def build_test_dataset(args, model_args, match_ids, *, feature_dir, label_dir, f
                 feature_root=str(feature_root), feature_dir=str(feature_dir),
                 intended_receiver_mode=getattr(model_args, "intended_receiver_mode", None),
                 use_carries=bool(getattr(model_args, "use_carries", False)))
+    plan = None
+    if resolved == "disk":
+        plan = PreparedDatasetPlan(match_ids, feature_dir=feature_dir, label_dir=label_dir,
+            cache_dir=args.dataset_cache_dir, node_identity_context=disk_args.get("node_identity_context"),
+            **dataset_args)
+        plan.assert_stable()
+        disk_args["preparation_plan"] = plan
+    if cache_session is not None:
+        from training_preflight import preflight_training_files
+        preflight_training_files([("evaluation", match_ids, feature_dir, label_dir)])
+        cache_session.start_model(plan.paths if plan is not None else [],
+                                  preparation_ids=[plan.cache_id] if plan is not None else [])
     print(f"Evaluation dataset loading: {resolved}", flush=True)
     dataset_class = PreparedActionDataset if resolved == "disk" else ActionDataset
     dataset = dataset_class(match_ids, feature_dir=feature_dir, label_dir=label_dir,
@@ -867,7 +880,7 @@ def write_model_evaluation_artifacts(
 
 def main():
     parser = argparse.ArgumentParser()
-    add_dataset_loading_arguments(parser)
+    add_dataset_loading_arguments(parser, purpose="evaluation")
     add_pass_height_argument(parser)
     add_evaluation_arguments(parser)
     add_outcome_bootstrap_arguments(parser)

@@ -1,12 +1,12 @@
 """Workflow ownership of prepared caches; OS locks and SQLite survive process death.
 
-Training claims last for one model, not its wrapper. Its files remain until a
-later model prunes obsolete entries. Evaluation retains completion cleanup.
+Training and evaluation claims last for one model, not its wrapper. Files remain
+until a later model prunes obsolete entries in the same cache root.
 """
 from __future__ import annotations
 
 import atexit
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -132,7 +132,7 @@ def atomic_json(path, value):
 
 class CacheWorkflow:
     def __init__(self, root, *, keep=False, kind='direct', descriptor=None,
-                 policy=None, parent=None):
+                 policy=None, parent=None, purpose=None):
         root = Path(root).resolve()
         pid, created = process_identity()
         self.descriptor = descriptor or dict(id=uuid.uuid4().hex, root=str(root),
@@ -143,6 +143,8 @@ class CacheWorkflow:
             self.descriptor['policy'] = policy
         if parent is not None:
             self.descriptor['parent'] = parent
+        if purpose is not None:
+            self.descriptor['purpose'] = purpose
         self.root = Path(self.descriptor['root']).resolve()
         self.sessions = {}
         self.finished = False
@@ -182,7 +184,7 @@ class CacheWorkflow:
                 try:
                     session = self.session_for(root)
                     reports.append(session.finish(success))
-                    if self.descriptor.get('kind') == 'wrapper':
+                    if self.descriptor.get('kind') in {'wrapper', 'evaluation_wrapper'}:
                         with cache_lock(root), database(root) as db:
                             model_starts.extend(json.loads(row['report']) for row in db.execute(
                                 'SELECT m.report FROM model_starts m JOIN session_policies p ON p.session=m.session '
@@ -193,7 +195,7 @@ class CacheWorkflow:
             errors.append(str(exc))
         self.report = dict(session=self.descriptor, status='completed' if success else 'failed',
                            roots=reports, cleanup_errors=errors)
-        if self.descriptor.get('kind') == 'wrapper':
+        if self.descriptor.get('kind') in {'wrapper', 'evaluation_wrapper'}:
             self.report['model_starts'] = model_starts
             self.report['model_start_totals'] = {
                 key: sum(report[key] for report in model_starts)
@@ -275,7 +277,7 @@ class CacheSession:
     def start_model(self, paths, *, preparation_ids=()):
         """Reserve both splits before pruning, without opening any graph payload."""
         if self.descriptor.get('policy') != 'model_start':
-            raise ValueError('Model-start pruning requires a training session.')
+            raise ValueError('Model-start pruning requires a model session.')
         desired = {self.checked_path(path)[1] for path in paths}
         with cache_lock(self.root), database(self.root) as db:
             if db.execute('SELECT 1 FROM model_starts WHERE session=?', (self.id,)).fetchone():
@@ -283,11 +285,12 @@ class CacheSession:
             db.executemany('INSERT OR IGNORE INTO uses(session,path) VALUES (?,?)',
                            [(self.id, key) for key in desired])
         summary = self.collect(trigger='model_start', desired=desired)
-        summary.update(model_use_id=self.id, preparation_ids=sorted(set(preparation_ids)),
+        summary.update(model_use_id=self.id, purpose=self.descriptor.get('purpose'),
+                       preparation_ids=sorted(set(preparation_ids)),
                        compatible_entries=summary['retention_reasons'].get('current_model', 0))
         with cache_lock(self.root), database(self.root) as db:
             db.execute('INSERT INTO model_starts VALUES (?,?)', (self.id, json.dumps(summary)))
-        print(f"Prepared cache model start: reclaimed {summary['deleted_entries']} entries "
+        print(f"Prepared {self.descriptor.get('purpose', 'model')} cache at {self.root}: reclaimed {summary['deleted_entries']} entries "
               f"({summary['deleted_bytes'] / 1024**3:.2f} GiB); "
               f"{summary['compatible_entries']} compatible entries available; "
               f"retained {summary['retained_bytes'] / 1024**3:.2f} GiB "
@@ -429,22 +432,29 @@ def record_report(directory, report):
 def workflow_running(descriptor):
     if not process_alive(descriptor['pid'], descriptor['created']):
         return False
-    with cache_lock(descriptor['root']), database(descriptor['root']) as db:
-        row = db.execute('SELECT status FROM sessions WHERE id=?', (descriptor['id'],)).fetchone()
-        return row is not None and row['status'] == 'running'
+    # Saved descriptors may point to an old root. Liveness checks must not
+    # migrate it or create lock/database files there.
+    try:
+        uri = (Path(descriptor['root']).resolve() / '.ownership.sqlite').as_uri() + '?mode=ro'
+        with closing(sqlite3.connect(uri, uri=True)) as db:
+            row = db.execute('SELECT status FROM sessions WHERE id=?', (descriptor['id'],)).fetchone()
+            return row is not None and row[0] == 'running'
+    except (OSError, sqlite3.Error):
+        return True  # A live owner with inaccessible records remains protected.
 
 
 @contextmanager
 def workflow_context(args, *, kind='wrapper', saved=None):
     """Wrapper scope; environment propagates the same workflow to child stages."""
-    from dataset_loading import DEFAULT_CACHE_DIR
+    from dataset_loading import configure_dataset_cache
+    purpose = 'evaluation' if kind == 'evaluation_wrapper' else 'training'
+    root = configure_dataset_cache(args, purpose, saved=saved)
     saved = saved or {}
-    root = saved.get('dataset_cache_dir') or getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR)
     previous = saved.get('cache_session')
     if previous and previous['kind'] == 'direct' and workflow_running(previous):
         raise RuntimeError('The original cache workflow is still running.')
     workflow = CacheWorkflow(root, keep=getattr(args, 'keep_cache', False) or saved.get('keep_cache', False),
-                             kind=kind, policy='model_start' if kind == 'wrapper' else 'completion')
+                             kind=kind, policy='model_start', purpose=purpose)
     before = os.environ.get(ENVIRONMENT_KEY)
     os.environ[ENVIRONMENT_KEY] = json.dumps(workflow.descriptor)
     success = False
@@ -460,46 +470,45 @@ def workflow_context(args, *, kind='wrapper', saved=None):
             os.environ[ENVIRONMENT_KEY] = before
 
 
-@contextmanager
-def evaluation_context(args):
-    """Attach an evaluator to its wrapper, or own a direct evaluation session."""
-    from dataset_loading import DEFAULT_CACHE_DIR
-    inherited = os.environ.get(ENVIRONMENT_KEY)
-    if inherited:
-        descriptor = json.loads(inherited)
-        descriptor['keep'] = descriptor.get('keep', False) or getattr(args, 'keep_cache', False)
-        workflow = CacheWorkflow.attached(descriptor)
-    else:
-        workflow = CacheWorkflow(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR),
-                                 keep=getattr(args, 'keep_cache', False), kind='evaluation')
-    args.cache_session = workflow.descriptor
-    success = False
-    try:
-        yield workflow.session_for(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR))
-        success = True
-    finally:
-        if inherited:
-            workflow.release()
-        else:
-            record_report(getattr(args, 'evaluation_output_dir', None), workflow.finish(success))
-
-
-@contextmanager
-def training_context(args):
-    from dataset_loading import DEFAULT_CACHE_DIR
+def model_workflow(args, purpose):
+    """Give each model fresh claims, inheriting only a matching wrapper's context."""
+    from dataset_loading import configure_dataset_cache
     inherited = os.environ.get(ENVIRONMENT_KEY)
     parent = json.loads(inherited) if inherited else {}
+    parent_purpose = parent.get('purpose') or (
+        'evaluation' if parent.get('kind') in {'evaluation', 'evaluation_wrapper'} else 'training')
+    if parent_purpose != purpose:
+        parent = {}
     previous = getattr(args, 'cache_session', None) if getattr(args, 'resume_checkpoint', None) else None
     if previous and previous['kind'] == 'direct' and workflow_running(previous):
         raise RuntimeError('The original cache workflow is still running.')
-    workflow = CacheWorkflow(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR),
-                             keep=getattr(args, 'keep_cache', False) or parent.get('keep', False),
-                             policy='model_start', parent=parent.get('id'))
+    saved = dict(vars(args)) if purpose == 'training' and getattr(args, 'resume_checkpoint', None) else None
+    root = configure_dataset_cache(args, purpose, saved=saved)
+    workflow = CacheWorkflow(root, keep=getattr(args, 'keep_cache', False) or parent.get('keep', False),
+                             kind='direct' if purpose == 'training' else 'evaluation',
+                             policy='model_start', parent=parent.get('id'), purpose=purpose)
     if parent:
         with cache_lock(parent['root']), database(parent['root']) as db:
             db.execute('INSERT OR IGNORE INTO roots VALUES (?,?)', (parent['id'], str(workflow.root)))
     args.cache_session = workflow.descriptor
-    session = workflow.session_for(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR))
+    return workflow
+
+
+@contextmanager
+def evaluation_context(args):
+    workflow = model_workflow(args, 'evaluation')
+    success = False
+    try:
+        yield workflow.session_for(args.dataset_cache_dir)
+        success = True
+    finally:
+        record_report(getattr(args, 'evaluation_output_dir', None), workflow.finish(success))
+
+
+@contextmanager
+def training_context(args):
+    workflow = model_workflow(args, 'training')
+    session = workflow.session_for(args.dataset_cache_dir)
     success = False
     try:
         yield session

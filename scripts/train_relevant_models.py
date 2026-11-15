@@ -1355,7 +1355,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--dataset-preparation-workers", "--dataset-worker-threads", "--interim-metrics", "--graph-validation", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--dataset-cache-dir", "--dataset-preparation-workers", "--dataset-worker-threads", "--interim-metrics", "--graph-validation", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
             parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         if not any(token.split("=", 1)[0] == "--batch-loader" for token in supplied):
@@ -2290,6 +2290,7 @@ def _main(cli_args) -> None:
                    "--monitoring", cli_args.monitoring]
         from datatools.graph_validation import graph_validation_flags
         command.extend(graph_validation_flags(cli_args))
+        command.extend(["--dataset-cache-dir", str(cli_args.dataset_cache_dir)])
         if cli_args.batch_loader is not None:
             command.extend(["--batch-loader", cli_args.batch_loader])
         for name in ("dataset_preparation_workers", "dataset_worker_threads", "interim_metrics"):

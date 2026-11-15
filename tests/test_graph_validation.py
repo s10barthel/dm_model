@@ -227,12 +227,15 @@ def test_delaunay_lookup_failure_has_context_without_validation_scan():
 @pytest.mark.parametrize("mode", ["on", "off"])
 def test_evaluation_and_pipeline_forwarding(monkeypatch, mode):
     import sys
+    from types import SimpleNamespace
     from scripts import evaluate_relevant_models as evaluation
     from scripts import main as pipeline
     args = evaluation.parse_args(["--pass-intent-model-id", "pass_intent/fixture", "--graph-validation", mode])
     command = evaluation.add_task_evaluation_options(["python", "test.py"], args, "pass_intent")
     assert command[command.index("--graph-validation") + 1] == mode
-    monkeypatch.setattr(sys, "argv", ["main", "--graph-validation", mode, "--only-success-intent", "--return_type", "next_10"])
+    monkeypatch.setattr(pipeline, "resolve_xt_version", lambda requested: SimpleNamespace(version="fixture"))
+    monkeypatch.setattr(sys, "argv", ["main", "--graph-validation", mode, "--only-success-intent",
+                                    "--xt-version", "fixture", "--return_type", "next_10"])
     args = pipeline.parse_args()
     commands = pipeline.build_commands(args)
     for script in ("scripts/generate_relevant_features.py", "scripts/train_relevant_models.py",

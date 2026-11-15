@@ -81,7 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
-    add_dataset_loading_arguments(parser)
+    add_dataset_loading_arguments(parser, purpose="evaluation")
     add_evaluation_arguments(parser)
     add_warning_argument(parser)
     add_outcome_bootstrap_arguments(parser)
@@ -253,7 +253,7 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
-    command.extend(dataset_loading_flags(args))
+    command.extend(dataset_loading_flags(args, purpose="evaluation"))
     if getattr(args, "feature_run_id", None):
         command.extend(["--feature-run-id", args.feature_run_id])
     if getattr(args, "evaluation_filter", None) is not None:
@@ -424,7 +424,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
                        "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
                        "--learning-curve-rows"]
             add_pc_xpass_options(command, args)
-            command.extend(dataset_loading_flags(args))
+            command.extend(dataset_loading_flags(args, purpose="evaluation"))
             if args.feature_run_id:
                 command.extend(["--feature-run-id", args.feature_run_id])
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
