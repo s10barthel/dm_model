@@ -334,7 +334,12 @@ def test_crash_capture_resolves_refit_stage(sources, tmp_path, monkeypatch):
 def test_empty_usable_split_fails_before_any_epoch(synthetic_training, split):
     run, observations, _, _, root = synthetic_training
     requested = "m0" if split == "training" else "m4"
-    (root / "features" / f"{requested}.pt").unlink()
+    # Keep input files readable so preflight succeeds; no pass has an eligible target.
+    from datatools.config import LABEL_INDEX
+    label_path = root / "labels" / f"{requested}.pt"
+    labels = torch.load(label_path, weights_only=False)
+    labels[:, LABEL_INDEX['intent_index']] = -1
+    torch.save(labels, label_path)
     flags = ["--training-count", "1"] if split == "training" else []
     with pytest.raises(ValueError, match=f"No usable {split} samples"):
         run("empty", flags)
@@ -342,7 +347,7 @@ def test_empty_usable_split_fails_before_any_epoch(synthetic_training, split):
     metadata = json.loads((root / "saved/pass_intent/empty/metadata.json").read_text())
     provenance = metadata["split_datasets"]["train" if split == "training" else split]
     assert provenance["requested_match_ids"] == [requested]
-    assert provenance["loaded_match_count"] == 0
+    assert provenance["loaded_match_count"] == 1
     assert provenance["contributing_match_count"] == 0
 
 

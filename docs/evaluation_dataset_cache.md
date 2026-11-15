@@ -35,8 +35,12 @@ invocations own their own workflow.
 
 By default, successful workflow completion cleans up eligible managed entries.
 Use `--keep-cache` to retain entries between separate scoring and conceding
-commands. As with training, failed workflows preserve completed entries, and
-existing retention/active-reader rules apply. Retained entries consume disk space;
+commands. Failed evaluation workflows preserve completed entries, and
+existing retention/active-reader rules apply. Training instead retains its cache
+until the next model starts and prunes obsolete unused entries at that point.
+Evaluation completion cannot sweep those retained training entries; active
+evaluation readers also protect their entries from training-start pruning.
+Retained entries consume disk space;
 the cache retains the existing disk reserve check. `--dataset-cache-dir PATH`
 selects another cache location.
 

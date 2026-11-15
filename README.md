@@ -1963,7 +1963,8 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--dataset-loading {auto,memory,disk}`: fresh runs default to prepared disk loading for all eight wrapper tasks, including IPW configurations. `memory` explicitly loads the full dataset into RAM. Training buffers four matches by default; validation loads one.
 - `--batch-loader {auto,pyg}`: defaults to direct packed batching for prepared disk datasets, with PyG fallback for unsupported schemas. Full monitoring selects PyG; memory datasets use PyG.
 - `--monitoring {off,light,on}`: defaults to `off`. `light` retains resource sampling and logs every 50 batches; `on` enables full telemetry and collation diagnostics.
-- `--keep-cache`: retain prepared graph/label caches after success. Otherwise newly managed entries are removed after the complete workflow succeeds and all consumers finish. Failed/interrupted workflows, pre-existing entries and explicit retention requests protect caches. See [prepared dataset loading](docs/intent_dataset_loading.md).
+- Training retains prepared graph/label caches after each model finishes. At each next model's startup, compatible entries are reused and obsolete unused managed entries are deleted before preparing replacements, including inside multi-model workflows. Historical failures do not block cleanup.
+- `--keep-cache`: persistently protect used prepared entries from later model-start pruning. Active readers, pre-existing entries, and library retention also protect caches. See [prepared dataset loading](docs/intent_dataset_loading.md).
 - `--resume-id <task/run_id[/stage]>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--keep-cache`, `--batch-loader`, `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
@@ -3221,8 +3222,9 @@ input-feature signatures in model and bundle metadata.
 
 
 Prepared training caches use lossless packed CPU tensors with lazy graph
-reconstruction for all eight wrapper tasks. Version 1 caches rebuild once;
-`--keep-cache` and workflow cleanup retain their existing behavior. See
+reconstruction for all eight wrapper tasks. Version 1 caches rebuild once.
+Training caches remain until the next model starts; `--keep-cache` persistently
+protects entries from that startup cleanup. See
 [dataset loading and cache lifetime](docs/intent_dataset_loading.md).
 
 For model-only early-contact cutoffs, see [Failed-pass trajectory refresh](docs/failed_pass_trajectories.md).

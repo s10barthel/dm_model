@@ -27,7 +27,8 @@ def add_dataset_loading_arguments(parser):
                         help="Native tensor threads per preparation worker (default: 1).")
     parser.add_argument("--dataset-cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--keep-cache", action="store_true", default=False,
-                        help="Retain prepared dataset caches after a successful workflow.")
+                        help="Persistently protect prepared caches from later model-start pruning; "
+                             "training otherwise retains caches until the next model starts.")
 
 
 def dataset_loading_flags(args):

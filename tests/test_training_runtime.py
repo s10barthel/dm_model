@@ -251,6 +251,25 @@ def preflight_training_entry(tmp_path, monkeypatch, preflight_inputs):
 
 
 @pytest.mark.parametrize("mode", ["memory", "disk"])
+def test_invalid_inputs_leave_previous_model_cache_intact(tmp_path, preflight_training_entry,
+                                                        preflight_inputs, mode):
+    from cache_lifetime import CacheWorkflow
+    root = tmp_path / 'cache'
+    old = CacheWorkflow(root, policy='model_start')
+    session = old.session_for(root)
+    path = root / ('a' * 32) / ('b' * 32 + '.pt')
+    with session.entry(path):
+        path.parent.mkdir()
+        path.write_bytes(b'previous cache')
+        session.recorded(path, built=True, size=path.stat().st_size)
+    old.finish(True)
+    (preflight_inputs['label_dir'] / 'v0.pt').unlink()
+    with pytest.raises(TrainingInputError, match='validation.*v0'):
+        preflight_training_entry('--dataset-loading', mode)
+    assert path.read_bytes() == b'previous cache'
+
+
+@pytest.mark.parametrize("mode", ["memory", "disk"])
 def test_unreadable_validation_stops_before_dataset_preparation(preflight_training_entry,
         preflight_inputs, monkeypatch, mode):
     import dataset

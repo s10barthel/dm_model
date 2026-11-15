@@ -541,7 +541,7 @@ def test_wrapper_forwards_keep_cache_to_every_task():
     assert all(wrapper.get_cli_value(c, "--interim-metrics") == "full" for c in commands)
 
 
-def test_full_split_verifier_resumes_owned_entries_and_cleans_up(tmp_path, artifacts, monkeypatch):
+def test_full_split_verifier_resumes_and_retains_cache_until_next_model(tmp_path, artifacts, monkeypatch):
     from scripts import verify_dataset_loading as verifier
     root = tmp_path / "verification"
     root.mkdir()
@@ -572,12 +572,92 @@ def test_full_split_verifier_resumes_owned_entries_and_cleans_up(tmp_path, artif
         verifier.worker(options)
         report = json.loads((root / "metadata.json").read_text())
         assert report["status"] == "completed"
-        assert report["cache_session"]["id"] == previous["cache_session"]["id"]
+        assert report["cache_session"]["id"] != previous["cache_session"]["id"]
         assert report["splits"]["training"]["streamed_samples"] > 0
         assert report["splits"]["validation"]["streamed_samples"] > 0
-        assert not list((root / "cache").rglob("*.pt"))
+        assert list((root / "cache").rglob("*.pt"))
     finally:
         torch.set_num_threads(threads)
+
+
+def test_read_only_dataset_plan_validates_sources_before_any_write(tmp_path, artifacts, monkeypatch):
+    root = tmp_path / 'uncreated_cache'
+    with monkeypatch.context() as context:
+        context.setattr(torch, 'load', lambda *a, **kw: pytest.fail('planning loaded a tensor'))
+        context.setattr(prepared.PreparedActionDataset, '_check_space',
+                        lambda *a, **kw: pytest.fail('planning checked replacement space'))
+        plan = prepared.PreparedDatasetPlan(['m0'], cache_dir=root, **artifacts)
+    assert not root.exists()
+    label = artifacts['label_dir'] / 'm0.pt'
+    label.write_bytes(b'changed source')
+    with pytest.raises(RuntimeError, match='Source changed after planning'):
+        prepared.PreparedActionDataset(['m0'], cache_dir=root, preparation_plan=plan,
+                                       progress=False, **artifacts)
+    assert not root.exists()
+
+
+def test_rolling_model_cache_reuses_then_prunes_before_space_check(tmp_path, artifacts, monkeypatch):
+    from cache_lifetime import training_context, workflow_context
+    root = tmp_path / 'cache'
+    args = SimpleNamespace(dataset_cache_dir=root, keep_cache=False)
+    writes = prepared.PreparedActionDataset._build_entry
+    check_space = prepared.PreparedActionDataset._check_space
+    with workflow_context(args) as wrapper:
+        for index, (ids, options) in enumerate([
+            (['m0', 'm1'], artifacts),
+            (['m1'], artifacts),
+            (['m1'], {**artifacts, 'min_pass_dur': 0}),
+        ]):
+            plan = prepared.PreparedDatasetPlan(ids, cache_dir=root, **options)
+            with training_context(args) as session:
+                report = session.start_model(plan.paths, preparation_ids=[plan.cache_id])
+                expected = set(plan.paths)
+                def no_obsolete_space(self, *a, **kw):
+                    assert set(root.glob('*/*.pt')) <= expected
+                    return check_space(self, *a, **kw)
+                def no_rebuild(self, *a, **kw):
+                    pytest.fail('compatible model rebuilt its dataset')
+                with monkeypatch.context() as context:
+                    context.setattr(prepared.PreparedActionDataset, '_check_space', no_obsolete_space)
+                    context.setattr(prepared.PreparedActionDataset, '_build_entry', no_rebuild if index == 1 else writes)
+                    dataset = prepared.PreparedActionDataset(
+                        ids, cache_dir=root, cache_session=session, preparation_plan=plan,
+                        progress=False, preparation_workers=2 if index == 0 else 1, **options)
+                assert dataset.preparation['reused'] == (1 if index == 1 else 0)
+                assert report['deleted_entries'] == (0 if index == 0 else 1)
+            assert set(root.glob('*/*.pt')) == expected
+    assert len(wrapper.report['model_starts']) == 3
+    assert set(root.glob('*/*.pt')) == expected
+
+
+def test_training_reserves_both_split_directories_and_removes_old_source_versions(tmp_path, artifacts):
+    import shutil
+    from cache_lifetime import training_context
+    root = tmp_path / 'cache'
+    args = SimpleNamespace(dataset_cache_dir=root, keep_cache=False)
+    valid_options = dict(artifacts, feature_dir=tmp_path / 'valid_features')
+    shutil.copytree(artifacts['feature_dir'], valid_options['feature_dir'])
+    previous = set()
+    for change_source in (False, True):
+        if change_source:
+            label = artifacts['label_dir'] / 'm0.pt'
+            values = torch.load(label, weights_only=False)
+            values[0, LABEL_INDEX['action_index']] += 100
+            torch.save(values, label)
+        plans = [prepared.PreparedDatasetPlan(['m0'], cache_dir=root, **options)
+                 for options in (artifacts, valid_options)]
+        desired = {path for plan in plans for path in plan.paths}
+        with training_context(args) as session:
+            report = session.start_model(desired)
+            if change_source:
+                assert report['deleted_entries'] == 2
+                assert all(not path.exists() for path in previous)
+            for options, plan in zip((artifacts, valid_options), plans):
+                prepared.PreparedActionDataset(['m0'], cache_dir=root, cache_session=session,
+                    preparation_plan=plan, progress=False, **options)
+            assert len({path.parent for path in desired}) == 2
+        assert set(root.glob('*/*.pt')) == desired
+        previous = desired
 
 
 

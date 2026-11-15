@@ -89,7 +89,7 @@ These options work in `train.py`, `scripts/train_relevant_models.py`, and
 | `--dataset-preparation-workers` | `1` | CPU processes preparing independent matches before training. See the worker-count benchmark for timing and memory guidance. |
 | `--dataset-worker-threads` | `1` | Native tensor/BLAS threads per spawned preparation worker; the single-process training thread setting is preserved. |
 | `--dataset-cache-dir` | `data/cache/intent_datasets` under the repository | Shared cache location; the historical directory name remains for compatibility. A different drive can be used. |
-| `--keep-cache` | Disabled | Keep prepared graph/label caches after the complete workflow succeeds. |
+| `--keep-cache` | Disabled | Persistently protect used prepared entries from pruning by later models. Default training retention lasts until the next model starts. |
 
 Add these options to an existing training command; feature regeneration is not
 needed. Disk loading supports inverse-propensity weighting. Preparation releases
@@ -146,35 +146,53 @@ release intentionally does not accept the older broad-fingerprint caches. Delete
 those caches manually and allow one rebuild. No automatic cache migration or
 legacy-ID aliasing is performed.
 
-Prepared entries created by training have durable ownership records in
-`.ownership.sqlite`; a process-safe root lock protects claims, validation,
-publication, and deletion. One wrapper workflow owns caches through all selected
-models, validation stages, and final refits. Direct training owns its own session.
+Prepared entries have durable ownership records in `.ownership.sqlite`.
+Each training model invocation owns separate live claims, including each
+validation stage and final refit inside a multi-model wrapper.
 
-After successful model and workflow artifact publication, entries are deleted
-only when every participating workflow succeeded, no process still reads them,
-and no workflow requested `--keep-cache`. A later workflow can collect entries
-whose cleanup was deferred by an active reader. Failure, cancellation, and
-abrupt exits retain completed entries. PID creation times prevent PID reuse from
-mistaking a different process for the original owner. Uncertain process access
-is treated conservatively.
+After validating its inputs and split settings, each model plans and reserves
+all its training and validation entry paths together. It then deletes obsolete,
+unused managed entries before preparing datasets or checking replacement disk
+space. Compatible requested entries are checked and reused; missing or corrupt
+entries are built. Obsolete matches and source versions within a compatible
+configuration are pruned too. Memory-loading models declare an empty prepared
+set and reclaim unused managed entries in their configured cache root.
 
-`--keep-cache` persistently retains entries for compatible later runs. Entries
-that existed before ownership tracking, and caches prepared directly through
-the library without a training session, are retained. Automatic cleanup never
-prunes source features, labels, model checkpoints, physical caches, or the
-separately controlled IPW probability cache. Retained entries can be deleted
-manually when no process uses them.
+After success, failure, or cancellation, training retains completed cache entries
+for the next model. Finishing a model releases its live claims; an idle wrapper
+does not protect previous models' caches. The next model may delete a configuration
+needed by a later stage, which will rebuild it when necessary. Historical failed
+or abandoned workflows no longer prevent model-start pruning. Resume declares
+fresh claims and rebuilds entries if a different model has already reclaimed them.
 
-Resume of a direct run reconnects its failed cache session. Resuming one stage
-from an interrupted wrapper does not complete the original multi-stage
-workflow, so its retained caches remain protected. Cleanup errors are reported
-without changing successful training status.
+Live processes, including preparation workers and evaluators, protect the entries
+they reserve or read. OS locks serialize publication and deletion. PID creation
+times prevent PID reuse from mistaking a different process for the original
+reader; uncertain process access is treated conservatively.
 
-Workflow manifests under `.sessions/` and `cache_lifetime` in workflow/model
-metadata report created/reused entries, deleted/retained bytes, retention
-reasons, and cleanup errors. Ownership and retention options do not enter the
-prepared-data identity.
+`--keep-cache` persistently protects used entries from future pruning. This is
+stronger than default retention until the next model. Entries that existed before
+ownership tracking, untracked files, and library-prepared caches with explicit
+retention remain protected. Such entries and other active readers can prevent
+reclamation and increase disk use beyond one model's requirements. Cleanup errors
+are reported, and the existing disk reserve check still stops preparation if
+insufficient space remains.
+
+Automatic cleanup never prunes source features, labels, model checkpoints,
+physical caches, or the separately controlled IPW probability cache. Opening the
+ownership database or importing code performs no deletion. Existing tracked caches
+become eligible only at a future validated model start. Refactoring the prepared
+loader changes its preprocessing fingerprint and can require one rebuild.
+
+Evaluation retains its separate workflow-completion cleanup policy, but cannot
+sweep entries retained under the training policy. Training-start pruning also
+honors live evaluation readers. See [evaluation dataset reuse](evaluation_dataset_cache.md).
+
+Workflow manifests under `.sessions/` and `cache_lifetime` in model metadata
+record created/reused entries, startup reclaimed bytes and entries, retained
+bytes by reason, and cleanup errors. Model exit reports embed the `model_start`
+report; wrapper reports aggregate `model_starts` and `model_start_totals`.
+Ownership and retention options do not enter the prepared-data identity.
 
 Run metadata also records each cache directory and identity, accepted sample counts,
 built/reused entry counts, cache bytes, preparation duration, and graph loading
@@ -215,15 +233,16 @@ stream the complete saved training/validation split, without training a model:
   --output-dir tmp/dataset_loading_verification
 ```
 
-Use a new output directory, or add `--resume` to reconnect the cache ownership
-of an interrupted verification in the same directory. Active verification
+Use a new output directory, or add `--resume` to reuse the cache
+of an earlier verification in the same directory. Active verification
 processes cannot be resumed concurrently. The verifier uses one CPU tensor
 thread for its small graph transformations; training thread settings are unchanged.
 The supervisor enforces a 24 GiB process-tree RSS or
 private-commit limit and writes `memory_report.json`, `metadata.json`, resource
-telemetry, and `verification.log`. Successful verification removes its managed
-cache by default; add `--keep-cache` to retain it. Failure preserves completed
-entries for inspection. This verifies data equivalence and loading behavior,
+telemetry, and `verification.log`. Verification retains completed cache entries
+after success or failure. The next invocation in that cache root prunes obsolete
+unused entries before preparing replacements; `--keep-cache` persistently
+protects entries from that pruning. This verifies data equivalence and loading behavior,
 not model-training throughput or full-epoch GPU memory.
 
 ## Historical intent verification on this machine

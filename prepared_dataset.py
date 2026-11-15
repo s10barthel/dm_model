@@ -171,23 +171,15 @@ def _prepare_match(task, settings):
 LOADED_PREPROCESSING_FINGERPRINT = loaded_preprocessing_fingerprint()
 
 
-class PreparedActionDataset(IterableDataset):
-    """Only metadata survives preparation; at most one group is loaded per iterator."""
+class PreparedDatasetPlan:
+    """Read-only preparation identity and complete per-match paths for reservation."""
 
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
-                 buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None,
-                 preparation_workers=1, worker_threads=1, node_identity_context=None, **options):
-        super().__init__()
+                 node_identity_context=None, **options):
         assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
                                     options.get("pass_height_diagnostic_label_dir"))
         if options.get("task") not in PREPARED_TASKS:
             raise ValueError(f"Prepared datasets do not support task {options.get('task')!r}.")
-        if int(buffer_matches) < 1:
-            raise ValueError("buffer_matches must be positive")
-        if int(preparation_workers) < 1 or int(worker_threads) < 1:
-            raise ValueError("preparation_workers and worker_threads must be positive")
-        self.buffer_matches = int(buffer_matches) if shuffle else 1
-        self.shuffle, self.seed, self.epoch = bool(shuffle), int(seed), 0
         self.requested_match_ids = [str(m) for m in match_ids]
         if len(set(self.requested_match_ids)) != len(self.requested_match_ids):
             raise ValueError("Duplicate match IDs in dataset split")
@@ -200,7 +192,7 @@ class PreparedActionDataset(IterableDataset):
         bound.apply_defaults()
         self.options = {k: v for k, v in bound.arguments.items()
                         if k not in {"self", "match_ids", "feature_dir", "label_dir"}}
-        from datatools.graph_validation import graph_validation_enabled, validation_stats
+        from datatools.graph_validation import graph_validation_enabled
         self.options["graph_validation"] = graph_validation_enabled(self.options["graph_validation"])
         if self.options.get("task") == "success_intent":
             from datatools.trajectory import directory_speed_definition, require_speed_definition
@@ -234,6 +226,78 @@ class PreparedActionDataset(IterableDataset):
         if self.node_identity_context:
             self.identity["node_identity_context"] = self.node_identity_context
         self.cache_id = _digest(self.identity)
+        self.cache_root = Path(cache_dir).resolve() / self.cache_id[:32]
+        self.request_key = self.request_identity(self.requested_match_ids, feature_dir, label_dir,
+                                                 cache_dir, node_identity_context, options)
+        self.pending = []
+        for match_id in self.requested_match_ids:
+            signatures = self._source_signatures(match_id)
+            key = _digest([match_id, signatures])
+            self.pending.append((match_id, signatures, self.cache_root / f"{key[:32]}.pt"))
+
+    @staticmethod
+    def request_identity(match_ids, feature_dir, label_dir, cache_dir, context, options):
+        return _digest([list(map(str, match_ids)), str(Path(feature_dir).resolve()),
+                        str(Path(label_dir).resolve()), str(Path(cache_dir).resolve()), context, options])
+
+    @property
+    def paths(self):
+        return [path for _, _, path in self.pending]
+
+    def assert_stable(self):
+        if preprocessing_fingerprint(self.options) != self.identity["code"]:
+            raise RuntimeError("Preprocessing code changed after dataset planning.")
+        for match_id, signatures, _ in self.pending:
+            if self._source_signatures(match_id) != signatures:
+                raise RuntimeError(f"Source changed after planning {match_id}; retry with stable artifacts.")
+
+    def _source_signatures(self, match_id):
+        paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
+        paths.append(self.feature_dir.parent / "failed_pass_trajectories" / f"{match_id}.parquet")
+        metadata_path = self.feature_dir.parent / "metadata.json"
+        if metadata_path.is_file() or self.options.get("task") == "success_intent":
+            paths.append(metadata_path)
+        for key, directory in self.options.items():
+            if not key.endswith("_dir") or directory is None:
+                continue
+            root = Path(directory)
+            if "label" in key:
+                paths.append(root / f"{match_id}.pt")
+            else:
+                paths.extend([root / "metadata.json", root / "matches" / f"{match_id}.parquet",
+                              root / f"{match_id}.parquet"])
+        if getattr(self, "node_identity_context", None):
+            from models.prediction_identity import legacy_identity_paths
+            paths.extend(legacy_identity_paths(match_id, self.node_identity_context["feature_root"],
+                                               SimpleNamespace(**self.node_identity_context)))
+        return [_signature(p) for p in paths]
+
+
+class PreparedActionDataset(IterableDataset):
+    """Only metadata survives preparation; at most one group is loaded per iterator."""
+
+    def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
+                 buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None,
+                 preparation_workers=1, worker_threads=1, node_identity_context=None,
+                 preparation_plan=None, **options):
+        super().__init__()
+        if int(buffer_matches) < 1:
+            raise ValueError("buffer_matches must be positive")
+        if int(preparation_workers) < 1 or int(worker_threads) < 1:
+            raise ValueError("preparation_workers and worker_threads must be positive")
+        self.buffer_matches = int(buffer_matches) if shuffle else 1
+        self.shuffle, self.seed, self.epoch = bool(shuffle), int(seed), 0
+        match_ids = list(match_ids)
+        plan = preparation_plan or PreparedDatasetPlan(
+            match_ids, feature_dir=feature_dir, label_dir=label_dir, cache_dir=cache_dir,
+            node_identity_context=node_identity_context, **options)
+        if plan.request_key != plan.request_identity(match_ids, feature_dir, label_dir, cache_dir,
+                                                     node_identity_context, options):
+            raise ValueError("Prepared dataset arguments do not match its plan.")
+        plan.assert_stable()
+        for name in ("requested_match_ids", "feature_dir", "label_dir", "node_identity_context",
+                     "options", "pass_height_threshold", "identity", "cache_id", "preparation_profile"):
+            setattr(self, name, getattr(plan, name))
         # Library callers retain their caches; CLI training supplies workflow ownership.
         self.cache_session = cache_session or CacheWorkflow(cache_dir, keep=True, kind="library").session_for(cache_dir)
         self.cache_root = Path(cache_dir).resolve() / self.cache_id[:32]
@@ -252,12 +316,8 @@ class PreparedActionDataset(IterableDataset):
         self.last_load_seconds = 0.0
         self._reconstruction_timing = {"seconds": 0.0}
         started = time.perf_counter()
-        pending = []
-        for match_id in self.requested_match_ids:
-            signatures = self._source_signatures(match_id)
-            key = _digest([match_id, signatures])
-            path = self.cache_root / f"{key[:32]}.pt"
-            pending.append((match_id, signatures, path, path.is_file()))
+        pending = [(match_id, signatures, path, path.is_file())
+                   for match_id, signatures, path in plan.pending]
         missing_bytes = sum(s[0][1] or 0 for _, s, _, exists in pending if not exists)
         if progress:
             print(f"Prepared cache: {sum(exists for _, _, _, exists in pending)} reusable, "
@@ -309,26 +369,7 @@ class PreparedActionDataset(IterableDataset):
             self.contributing_match_ids.append(match_id)
             self.entries.append(entry)
 
-    def _source_signatures(self, match_id):
-        paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
-        paths.append(self.feature_dir.parent / "failed_pass_trajectories" / f"{match_id}.parquet")
-        metadata_path = self.feature_dir.parent / "metadata.json"
-        if metadata_path.is_file() or self.options.get("task") == "success_intent":
-            paths.append(metadata_path)
-        for key, directory in self.options.items():
-            if not key.endswith("_dir") or directory is None:
-                continue
-            root = Path(directory)
-            if "label" in key:
-                paths.append(root / f"{match_id}.pt")
-            else:
-                paths.extend([root / "metadata.json", root / "matches" / f"{match_id}.parquet",
-                              root / f"{match_id}.parquet"])
-        if getattr(self, "node_identity_context", None):
-            from models.prediction_identity import legacy_identity_paths
-            paths.extend(legacy_identity_paths(match_id, self.node_identity_context["feature_root"],
-                                               SimpleNamespace(**self.node_identity_context)))
-        return [_signature(p) for p in paths]
+    _source_signatures = PreparedDatasetPlan._source_signatures
 
     def _check_space(self, additional=0):
         free = shutil.disk_usage(self.cache_root).free

@@ -22,7 +22,7 @@ from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loadi
 from cache_lifetime import training_context
 from ipw_options import add_ipw_arguments, restore_ipw_defaults
 from ipw_preparation import IPWPreparer
-from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
+from prepared_dataset import PreparedActionDataset, PreparedDatasetPlan, LOADED_PREPROCESSING_FINGERPRINT
 from training_preflight import preflight_training_files, require_complete_dataset
 from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
     atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
@@ -1266,13 +1266,28 @@ def main(cache_session):
                   "seed": args.seed, "cache_session": cache_session,
                   "preparation_workers": getattr(args, "dataset_preparation_workers", 1),
                   "worker_threads": getattr(args, "dataset_worker_threads", 1)} if args.resolved_dataset_loading == "disk" else {})
+    # Reserve both splits before pruning or checking replacement disk space.
+    train_plan = valid_plan = None
+    if disk_args:
+        train_plan = PreparedDatasetPlan(
+            train_match_ids, feature_dir=args.train_feature_dir, label_dir=args.train_label_dir,
+            cache_dir=args.dataset_cache_dir, **common_dataset_args)
+        if not args.final_refit:
+            valid_plan = PreparedDatasetPlan(
+                valid_match_ids, feature_dir=args.valid_feature_dir, label_dir=args.valid_label_dir,
+                cache_dir=args.dataset_cache_dir, **common_dataset_args)
+    plans = [plan for plan in (train_plan, valid_plan) if plan is not None]
+    for plan in plans:
+        plan.assert_stable()
+    cache_session.start_model([path for plan in plans for path in plan.paths],
+                              preparation_ids=[plan.cache_id for plan in plans])
     monitor.event("preparation_start", device, split="training")
     train_dataset = dataset_class(
         train_match_ids,
         feature_dir=args.train_feature_dir,
         label_dir=args.train_label_dir,
         **disk_args,
-        **({"shuffle": True} if disk_args else {}),
+        **({"shuffle": True, "preparation_plan": train_plan} if disk_args else {}),
         **common_dataset_args,
     )
     require_complete_dataset(train_dataset, train_match_ids, "training")
@@ -1283,6 +1298,7 @@ def main(cache_session):
         feature_dir=args.valid_feature_dir,
         label_dir=args.valid_label_dir,
         **disk_args,
+        **({"preparation_plan": valid_plan} if disk_args else {}),
         **common_dataset_args,
     )
     if valid_dataset is not None:

@@ -1,7 +1,7 @@
 """Compare prepared samples and stream a complete split under a 24 GiB guard.
 
 Verification writes only beneath --output-dir and never trains or alters a model.
-Successful verification removes its managed graph cache unless --keep-cache is set.
+Verification retains its cache until the next verification prunes obsolete entries.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def worker(options):
     from cache_lifetime import atomic_json, training_context
     from dataset import ActionDataset
     from models.dataset_config import build_action_dataset_kwargs
-    from prepared_dataset import PreparedActionDataset
+    from prepared_dataset import PreparedActionDataset, PreparedDatasetPlan
     from training_monitor import TrainingMonitor
 
     # Small per-graph tensor operations otherwise spend most time in thread pools.
@@ -79,6 +79,17 @@ def worker(options):
                 lane_survival_cache_dir=args.get("lane_survival_cache_dir"))
             feature_dir = metadata["resolved_dirs"]["train_feature_dir"]
             label_dir = metadata["resolved_dirs"]["train_label_dir"]
+            plans = {}
+            for split, dir_key in (("train", "train"), ("validation", "valid")):
+                plans[split] = PreparedDatasetPlan(
+                    metadata[split + "_match_ids"],
+                    feature_dir=metadata["resolved_dirs"][dir_key + "_feature_dir"],
+                    label_dir=metadata["resolved_dirs"][dir_key + "_label_dir"],
+                    cache_dir=args["dataset_cache_dir"], **kwargs)
+            for plan in plans.values():
+                plan.assert_stable()
+            session.start_model([path for plan in plans.values() for path in plan.paths],
+                                preparation_ids=[plan.cache_id for plan in plans.values()])
             ids = sorted(metadata["train_match_ids"], key=lambda m: (Path(feature_dir) / (m + ".pt")).stat().st_size)
             sample_ids = list(dict.fromkeys(ids[int((len(ids) - 1) * f)] for f in (.2, .5, .8)))
             for match_id in sample_ids:
@@ -98,6 +109,7 @@ def worker(options):
                     feature_dir=metadata["resolved_dirs"][dir_key + "_feature_dir"],
                     label_dir=metadata["resolved_dirs"][dir_key + "_label_dir"],
                     cache_dir=args["dataset_cache_dir"], cache_session=session,
+                    preparation_plan=plans[key],
                     buffer_matches=args.get("dataset_buffer_matches", 4), shuffle=split == "training",
                     seed=args.get("seed", 100), **kwargs)
                 monitor.event("preparation_complete", "cpu", split=split, samples=len(dataset))

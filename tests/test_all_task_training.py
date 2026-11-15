@@ -1,4 +1,4 @@
-"""Exercise real forward/backward, validation, checkpointing and cache cleanup."""
+"""Exercise real forward/backward, validation, checkpointing and cache retention."""
 import faulthandler
 import json
 from pathlib import Path
@@ -67,8 +67,10 @@ def test_fresh_cli_all_tasks_default_to_disk(tmp_path, monkeypatch, task, archit
     assert checkpoint["metadata"]["last_epoch_valid_metrics"]
     report = json.loads((directory / "metadata.json").read_text())["cache_lifetime"]
     assert report["status"] == "completed"
-    assert report["roots"][0]["deleted_entries"] == (0 if keep_cache else 5)
-    assert bool(list((tmp_path / "cache").rglob("*.pt"))) == keep_cache
+    assert report["roots"][0]["deleted_entries"] == 0
+    assert report["roots"][0]["trigger"] == "model_exit"
+    assert report["roots"][0]["model_start"]["trigger"] == "model_start"
+    assert len(list((tmp_path / "cache").rglob("*.pt"))) == 5
 
 
 @pytest.mark.parametrize("task", ["pass_success", "pass_height"])

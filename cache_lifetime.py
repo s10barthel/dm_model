@@ -1,7 +1,7 @@
 """Workflow ownership of prepared caches; OS locks and SQLite survive process death.
 
-A session claims files before preparing/reading them. Claims last for the whole
-workflow, including idle time between child stages. Untracked files are retained.
+Training claims last for one model, not its wrapper. Its files remain until a
+later model prunes obsolete entries. Evaluation retains completion cleanup.
 """
 from __future__ import annotations
 
@@ -104,7 +104,14 @@ def database(root):
             session TEXT, pid INTEGER, created REAL, PRIMARY KEY(session, pid, created));
         CREATE TABLE IF NOT EXISTS roots (
             session TEXT, root TEXT, PRIMARY KEY(session, root));
+        CREATE TABLE IF NOT EXISTS session_policies (
+            session TEXT PRIMARY KEY, policy TEXT, parent TEXT);
+        CREATE TABLE IF NOT EXISTS model_starts (
+            session TEXT PRIMARY KEY, report TEXT);
+        CREATE INDEX IF NOT EXISTS uses_path ON uses(path);
     ''')
+    if db.execute('PRAGMA user_version').fetchone()[0] < 1:
+        db.execute('PRAGMA user_version=1')
     try:
         with db:
             yield db
@@ -124,13 +131,18 @@ def atomic_json(path, value):
 
 
 class CacheWorkflow:
-    def __init__(self, root, *, keep=False, kind='direct', descriptor=None):
+    def __init__(self, root, *, keep=False, kind='direct', descriptor=None,
+                 policy=None, parent=None):
         root = Path(root).resolve()
         pid, created = process_identity()
         self.descriptor = descriptor or dict(id=uuid.uuid4().hex, root=str(root),
                                              pid=pid, created=created, kind=kind, keep=bool(keep))
         self.descriptor = dict(self.descriptor)
         self.descriptor.update(pid=pid, created=created, keep=bool(keep or self.descriptor.get('keep')))
+        if policy is not None:
+            self.descriptor['policy'] = policy
+        if parent is not None:
+            self.descriptor['parent'] = parent
         self.root = Path(self.descriptor['root']).resolve()
         self.sessions = {}
         self.finished = False
@@ -160,6 +172,7 @@ class CacheWorkflow:
             return self.report
         self.finished = True
         reports = []
+        model_starts = []
         errors = []
         try:
             with cache_lock(self.root), database(self.root) as db:
@@ -169,12 +182,22 @@ class CacheWorkflow:
                 try:
                     session = self.session_for(root)
                     reports.append(session.finish(success))
+                    if self.descriptor.get('kind') == 'wrapper':
+                        with cache_lock(root), database(root) as db:
+                            model_starts.extend(json.loads(row['report']) for row in db.execute(
+                                'SELECT m.report FROM model_starts m JOIN session_policies p ON p.session=m.session '
+                                'WHERE p.parent=? ORDER BY m.rowid', (self.descriptor['id'],)))
                 except Exception as exc:
                     errors.append(f'{root}: {exc}')
         except Exception as exc:
             errors.append(str(exc))
         self.report = dict(session=self.descriptor, status='completed' if success else 'failed',
                            roots=reports, cleanup_errors=errors)
+        if self.descriptor.get('kind') == 'wrapper':
+            self.report['model_starts'] = model_starts
+            self.report['model_start_totals'] = {
+                key: sum(report[key] for report in model_starts)
+                for key in ('deleted_entries', 'deleted_bytes')}
         try:
             atomic_json(self.root / '.sessions' / (self.descriptor['id'] + '.json'), self.report)
         except OSError as exc:
@@ -200,6 +223,8 @@ class CacheSession:
                 (self.id, descriptor['pid'], descriptor['created'], descriptor['kind'],
                  'running', int(descriptor.get('keep', False))))
             db.execute('INSERT OR IGNORE INTO readers VALUES (?,?,?)', (self.id, self.pid, self.created))
+            db.execute('INSERT OR REPLACE INTO session_policies VALUES (?,?,?)',
+                       (self.id, descriptor.get('policy', 'completion'), descriptor.get('parent')))
         atexit.register(self.release)
 
     def checked_path(self, path):
@@ -212,13 +237,16 @@ class CacheSession:
             raise ValueError(f'Invalid prepared cache entry: {path}')
         return path, relative.as_posix()
 
+    def entry_lock(self, path):
+        return file_lock(self.root / '.entry_locks' / (path.parent.name + path.stem + '.lock'))
+
     @contextmanager
     def entry(self, path):
         """Serialize validation/build/publication and durably claim before any use."""
         path, key = self.checked_path(path)
         # Different entries may build concurrently. Register the durable claim
         # under the root lock before releasing it; cleanup sees this live reader.
-        with file_lock(self.root / '.entry_locks' / (path.parent.name + path.stem + '.lock')):
+        with self.entry_lock(path):
             with cache_lock(self.root), database(self.root) as db:
                 existed = path.exists() or path.with_suffix('.json').exists()
                 db.execute('INSERT OR IGNORE INTO entries VALUES (?,?,?,0)',
@@ -244,58 +272,144 @@ class CacheSession:
         except (OSError, sqlite3.Error):
             pass
 
-    def finish(self, success):
-        summary = dict(root=str(self.root), created_entries=0, reused_entries=0,
-                       deleted_bytes=0, deleted_entries=0, retained_bytes=0,
-                       retention_reasons={}, cleanup_errors=[])
+    def start_model(self, paths, *, preparation_ids=()):
+        """Reserve both splits before pruning, without opening any graph payload."""
+        if self.descriptor.get('policy') != 'model_start':
+            raise ValueError('Model-start pruning requires a training session.')
+        desired = {self.checked_path(path)[1] for path in paths}
         with cache_lock(self.root), database(self.root) as db:
-            db.execute('UPDATE sessions SET status=? WHERE id=?', ('completed' if success else 'failed', self.id))
-            db.execute('DELETE FROM readers WHERE session=? AND pid=? AND created=?',
-                       (self.id, self.pid, self.created))
-            for row in db.execute("SELECT * FROM sessions WHERE status='running'").fetchall():
-                if not process_alive(row['pid'], row['created']):
-                    db.execute("UPDATE sessions SET status='abandoned' WHERE id=?", (row['id'],))
-            readers = set()
-            for row in db.execute('SELECT * FROM readers').fetchall():
-                if process_alive(row['pid'], row['created']):
-                    readers.add(row['session'])
-                else:
-                    db.execute('DELETE FROM readers WHERE session=? AND pid=? AND created=?',
-                               (row['session'], row['pid'], row['created']))
+            if db.execute('SELECT 1 FROM model_starts WHERE session=?', (self.id,)).fetchone():
+                raise RuntimeError('Model cache requirements have already been declared.')
+            db.executemany('INSERT OR IGNORE INTO uses(session,path) VALUES (?,?)',
+                           [(self.id, key) for key in desired])
+        summary = self.collect(trigger='model_start', desired=desired)
+        summary.update(model_use_id=self.id, preparation_ids=sorted(set(preparation_ids)),
+                       compatible_entries=summary['retention_reasons'].get('current_model', 0))
+        with cache_lock(self.root), database(self.root) as db:
+            db.execute('INSERT INTO model_starts VALUES (?,?)', (self.id, json.dumps(summary)))
+        print(f"Prepared cache model start: reclaimed {summary['deleted_entries']} entries "
+              f"({summary['deleted_bytes'] / 1024**3:.2f} GiB); "
+              f"{summary['compatible_entries']} compatible entries available; "
+              f"retained {summary['retained_bytes'] / 1024**3:.2f} GiB "
+              f"{summary['retention_reasons']}.", flush=True)
+        return summary
+
+    @staticmethod
+    def live_readers(db, processes=None):
+        processes = {} if processes is None else processes
+        def alive(pid, created):
+            key = (pid, created)
+            if key not in processes:
+                processes[key] = process_alive(pid, created)
+            return processes[key]
+        for row in db.execute("SELECT * FROM sessions WHERE status='running'").fetchall():
+            if not alive(row['pid'], row['created']):
+                db.execute("UPDATE sessions SET status='abandoned' WHERE id=?", (row['id'],))
+        readers = set()
+        for row in db.execute('SELECT * FROM readers').fetchall():
+            if alive(row['pid'], row['created']):
+                readers.add(row['session'])
+            else:
+                db.execute('DELETE FROM readers WHERE session=? AND pid=? AND created=?',
+                           (row['session'], row['pid'], row['created']))
+        return readers
+
+    def retention_reason(self, db, entry, readers, trigger, desired):
+        users = db.execute('SELECT s.*,p.policy FROM uses u JOIN sessions s ON s.id=u.session '
+                           'LEFT JOIN session_policies p ON p.session=s.id WHERE u.path=?', (entry['path'],)).fetchall()
+        reason = ('current_model' if entry['path'] in desired else
+                  'pre_existing' if not entry['managed'] else
+                  'keep_cache' if entry['retained'] or any(u['keep'] for u in users) else
+                  'active_reader' if any(u['id'] in readers for u in users) else None)
+        if reason is None and trigger != 'model_start':
+            reason = ('awaiting_next_model' if self.descriptor.get('policy') == 'model_start'
+                      or any(u['policy'] == 'model_start' for u in users) else
+                      'unfinished_or_failed_workflow' if any(u['status'] != 'completed' for u in users)
+                      else None)
+        return reason
+
+    @staticmethod
+    def retain(summary, path, reason):
+        if path.exists():
+            size = path.stat().st_size
+            summary['retained_bytes'] += size
+            summary['retention_reasons'][reason] = summary['retention_reasons'].get(reason, 0) + 1
+            summary['retention_bytes'][reason] = summary['retention_bytes'].get(reason, 0) + size
+
+    def collect(self, *, trigger, desired=()):
+        summary = dict(root=str(self.root), trigger=trigger, created_entries=0, reused_entries=0,
+                       deleted_bytes=0, deleted_entries=0, retained_bytes=0,
+                       retention_reasons={}, retention_bytes={}, cleanup_errors=[])
+        processes = {}
+        with cache_lock(self.root), database(self.root) as db:
+            self.live_readers(db, processes)
+            keys = [r['path'] for r in db.execute('SELECT path FROM entries')]
             counts = db.execute('SELECT SUM(built),SUM(reused) FROM uses WHERE session=?', (self.id,)).fetchone()
             summary.update(created_entries=counts[0] or 0, reused_entries=counts[1] or 0)
-            # Also collect entries deferred by a successful earlier workflow.
-            for entry in db.execute('SELECT * FROM entries').fetchall():
-                users = db.execute('SELECT s.* FROM uses u JOIN sessions s ON s.id=u.session WHERE u.path=?',
-                                   (entry['path'],)).fetchall()
-                reason = ('pre_existing' if not entry['managed'] else
-                          'keep_cache' if entry['retained'] or any(u['keep'] for u in users) else
-                          'active_reader' if any(u['id'] in readers for u in users) else
-                          'unfinished_or_failed_workflow' if any(u['status'] != 'completed' for u in users) else None)
-                path, _ = self.checked_path(self.root / entry['path'])
-                if reason:
-                    if path.exists():
-                        summary['retained_bytes'] += path.stat().st_size
-                        summary['retention_reasons'][reason] = summary['retention_reasons'].get(reason, 0) + 1
-                    continue
-                try:
-                    # Resolve again under the lock, rejecting links that escape root.
-                    path.with_suffix('.json').resolve().relative_to(self.root)
+        for key in keys:
+            try:
+                path, resolved_key = self.checked_path(self.root / key)
+                if resolved_key != key:
+                    raise ValueError('Tracked cache path resolves to another entry')
+                # Protected readers/builders need not finish before we can report.
+                with cache_lock(self.root), database(self.root) as db:
+                    entry = db.execute('SELECT * FROM entries WHERE path=?', (key,)).fetchone()
+                    if entry is None:
+                        continue
+                    reason = self.retention_reason(db, entry, self.live_readers(db, processes), trigger, desired)
+                    if reason:
+                        self.retain(summary, path, reason)
+                        continue
+                # Never wait for an entry lock while holding the root lock.
+                with self.entry_lock(path), cache_lock(self.root), database(self.root) as db:
+                    path, resolved_key = self.checked_path(self.root / key)
+                    if resolved_key != key:
+                        raise ValueError('Tracked cache path resolves to another entry')
+                    entry = db.execute('SELECT * FROM entries WHERE path=?', (key,)).fetchone()
+                    if entry is None:
+                        continue
+                    readers = self.live_readers(db, processes)
+                    reason = self.retention_reason(db, entry, readers, trigger, desired)
+                    if reason:
+                        self.retain(summary, path, reason)
+                        continue
                     size = path.stat().st_size if path.exists() else 0
+                    path.with_suffix('.json').resolve().relative_to(self.root)
                     path.with_suffix('.json').unlink(missing_ok=True)
                     path.unlink(missing_ok=True)
                     summary['deleted_bytes'] += size
                     summary['deleted_entries'] += 1
-                    db.execute('DELETE FROM uses WHERE path=?', (entry['path'],))
-                    db.execute('DELETE FROM entries WHERE path=?', (entry['path'],))
+                    db.execute('DELETE FROM uses WHERE path=?', (key,))
+                    db.execute('DELETE FROM entries WHERE path=?', (key,))
                     try:
                         path.parent.rmdir()
                     except OSError:
                         pass
-                except (OSError, ValueError) as exc:
-                    summary['cleanup_errors'].append(f'{path}: {exc}')
+            except (OSError, ValueError) as exc:
+                summary['cleanup_errors'].append(f'{key}: {exc}')
         if summary['cleanup_errors']:
             print('Prepared cache cleanup incomplete: ' + '; '.join(summary['cleanup_errors']), flush=True)
+        # Files predating ownership tracking remain untouched and visible in reports.
+        with cache_lock(self.root), database(self.root) as db:
+            tracked = {row['path'] for row in db.execute('SELECT path FROM entries')}
+            for path in self.root.glob('*/*.pt'):
+                try:
+                    path, key = self.checked_path(path)
+                    if key not in tracked:
+                        self.retain(summary, path, 'pre_existing')
+                except (OSError, ValueError):
+                    pass  # Unrecognized or escaping paths are never adopted/deleted.
+        return summary
+
+    def finish(self, success):
+        with cache_lock(self.root), database(self.root) as db:
+            db.execute('UPDATE sessions SET status=? WHERE id=?', ('completed' if success else 'failed', self.id))
+            db.execute('DELETE FROM readers WHERE session=? AND pid=? AND created=?',
+                       (self.id, self.pid, self.created))
+            startup = db.execute('SELECT report FROM model_starts WHERE session=?', (self.id,)).fetchone()
+        summary = self.collect(trigger='model_exit' if self.descriptor.get('policy') == 'model_start' else 'completion')
+        if startup:
+            summary['model_start'] = json.loads(startup['report'])
         return summary
 
 
@@ -327,12 +441,10 @@ def workflow_context(args, *, kind='wrapper', saved=None):
     saved = saved or {}
     root = saved.get('dataset_cache_dir') or getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR)
     previous = saved.get('cache_session')
-    # Resuming a single stage must not complete its original wrapper workflow.
-    reconnect = previous if previous and previous['kind'] == 'direct' else None
-    if reconnect and workflow_running(reconnect):
+    if previous and previous['kind'] == 'direct' and workflow_running(previous):
         raise RuntimeError('The original cache workflow is still running.')
     workflow = CacheWorkflow(root, keep=getattr(args, 'keep_cache', False) or saved.get('keep_cache', False),
-                             kind=kind, descriptor=reconnect)
+                             kind=kind, policy='model_start' if kind == 'wrapper' else 'completion')
     before = os.environ.get(ENVIRONMENT_KEY)
     os.environ[ENVIRONMENT_KEY] = json.dumps(workflow.descriptor)
     success = False
@@ -376,19 +488,16 @@ def evaluation_context(args):
 def training_context(args):
     from dataset_loading import DEFAULT_CACHE_DIR
     inherited = os.environ.get(ENVIRONMENT_KEY)
-    if inherited:
-        descriptor = json.loads(inherited)
-        descriptor['keep'] = descriptor.get('keep', False) or getattr(args, 'keep_cache', False)
-        workflow = CacheWorkflow.attached(descriptor)
-        owner = False
-    else:
-        previous = getattr(args, 'cache_session', None) if getattr(args, 'resume_checkpoint', None) else None
-        reconnect = previous if previous and previous['kind'] == 'direct' else None
-        if reconnect and workflow_running(reconnect):
-            raise RuntimeError('The original cache workflow is still running.')
-        workflow = CacheWorkflow(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR),
-                                 keep=getattr(args, 'keep_cache', False), descriptor=reconnect)
-        owner = True
+    parent = json.loads(inherited) if inherited else {}
+    previous = getattr(args, 'cache_session', None) if getattr(args, 'resume_checkpoint', None) else None
+    if previous and previous['kind'] == 'direct' and workflow_running(previous):
+        raise RuntimeError('The original cache workflow is still running.')
+    workflow = CacheWorkflow(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR),
+                             keep=getattr(args, 'keep_cache', False) or parent.get('keep', False),
+                             policy='model_start', parent=parent.get('id'))
+    if parent:
+        with cache_lock(parent['root']), database(parent['root']) as db:
+            db.execute('INSERT OR IGNORE INTO roots VALUES (?,?)', (parent['id'], str(workflow.root)))
     args.cache_session = workflow.descriptor
     session = workflow.session_for(getattr(args, 'dataset_cache_dir', DEFAULT_CACHE_DIR))
     success = False
@@ -399,11 +508,8 @@ def training_context(args):
         monitor = getattr(args, '_monitor', None)
         if monitor is not None:
             monitor.close()
-        if owner:
-            report = workflow.finish(success)
-            record_report(getattr(args, '_cache_metadata_directory', None), report)
-            if success and getattr(args, 'artifact_stage', None):
-                from training_state import publish_stage_artifacts
-                publish_stage_artifacts(args._cache_metadata_directory)
-        else:
-            workflow.release()
+        report = workflow.finish(success)
+        record_report(getattr(args, '_cache_metadata_directory', None), report)
+        if success and getattr(args, 'artifact_stage', None):
+            from training_state import publish_stage_artifacts
+            publish_stage_artifacts(args._cache_metadata_directory)

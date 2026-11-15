@@ -182,6 +182,7 @@ def synthetic_training(tmp_path, monkeypatch):
     monkeypatch.setattr(utils, "run_epoch", epoch)
     base = ["train.py", "--task", "pass_intent", "--model", "gat", "--device", "cpu",
         "--feature_dir", str(features), "--label_dir", str(labels_dir), "--dataset-loading", "memory",
+        "--dataset-cache-dir", str(tmp_path / "cache"),
         "--node_emb_dim", "8", "--graph_emb_dim", "8", "--gnn_heads", "2",
         "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-goal-nodes",
         "--start_lr", ".002", "--min_lr", ".001", "--early-stopping-min-epochs", "1",
