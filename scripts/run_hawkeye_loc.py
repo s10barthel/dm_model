@@ -298,7 +298,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--control-inflection-point", "--control_inflection_point", dest="control_inflection_point", type=float, default=PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT)
     parser.add_argument(
         "--endpoint-normalization", "--endpoint_normalization",
-        choices=["normal", "normal-one", "subtract", "subtract-one"],
+        choices=["share", "normal", "normal-one", "subtract", "subtract-one"],
         default=PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
     )
     parser.add_argument("--boost-def-endpoint-control", "--boost_def_endpoint_control", dest="boost_def_endpoint_control", type=float, default=PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL)
@@ -318,13 +318,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     teammate_group = parser.add_mutually_exclusive_group()
     teammate_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
     teammate_group.add_argument("--consider-teammates", dest="consider_teammates", action="store_true")
-    parser.add_argument("--ignore-teammates-lane-survival", "--ignore_teammates_lane_survival", dest="ignore_teammates_lane_survival", action="store_true")
+    parser.add_argument(
+        "--ignore-teammates-lane-survival", "--ignore_teammates_lane_survival",
+        dest="ignore_teammates_lane_survival", action="store_true",
+        help="Ignore teammate lane interference (default for new caches); saved cache settings take precedence.",
+    )
     parser.add_argument("--ignore-teammates-control", "--ignore_teammates_control", dest="ignore_teammates_control", action="store_true")
     parser.add_argument("--no-max", "--no_max", dest="export_max", action="store_false")
     parser.add_argument("--no-topmean", "--no_topmean", dest="export_topmean", action="store_false")
     parser.set_defaults(
         consider_teammates=True,
-        ignore_teammates_lane_survival=False,
+        ignore_teammates_lane_survival=True,
         ignore_teammates_control=False,
         export_max=True,
         export_topmean=True,

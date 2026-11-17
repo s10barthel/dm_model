@@ -58,6 +58,36 @@ def test_ball_motion_cli_values(value, expected):
     assert location.parse_args([]).ball_dec == .45
 
 
+@pytest.mark.parametrize("flag", ["--endpoint-normalization", "--endpoint_normalization"])
+@pytest.mark.parametrize("value", ["share", "normal", "normal-one", "subtract", "subtract-one"])
+def test_location_endpoint_normalization_choices(flag, value):
+    assert location.parse_args([flag, value]).endpoint_normalization == value
+
+
+@pytest.mark.parametrize("flags", [[], ["--ignore-teammates-lane-survival"], ["--ignore_teammates_lane_survival"]])
+def test_location_teammate_defaults_match_generator(flags):
+    args = location.parse_args(flags)
+    reference = generate.parse_args(["--pc-xpass"])
+    assert args.endpoint_normalization == reference.endpoint_normalization == "share"
+    assert args.ignore_teammates_lane_survival is reference.ignore_teammates_lane_survival is True
+    assert args.consider_teammates is True
+    assert args.ignore_teammates_control is False
+
+
+def test_location_saved_lane_survival_setting_overrides_default(cache_root):
+    args = location.parse_args([])
+    # Simulate a location cache created with the previous default.
+    args.ignore_teammates_lane_survival = False
+    versions.start_generation(args, location=True)
+    versions.finish_generation(args)
+
+    reused = location.parse_args(["--pc-xpass-id", args.pc_xpass_id])
+    assert reused.ignore_teammates_lane_survival is False
+    assert reused.pc_xpass_overrides == []
+    assert versions.settings(reused)["ignore_teammates_lane_survival"] is False
+    assert location.parse_args([]).ignore_teammates_lane_survival is True
+
+
 @pytest.mark.parametrize("deceleration", [-1, float("nan"), float("inf"), "unknown"])
 def test_invalid_deceleration(deceleration):
     with pytest.raises(ValueError):
