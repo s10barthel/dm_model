@@ -14,7 +14,7 @@ from datatools import config
 from datatools.artifact_storage import staged_path
 from datatools.return_windows import bounded_returns
 from datatools.xt_targets import target_settings, surface_from_metadata, transform_action_targets, unavailable_xt_returns
-from project_config import parse_return_type, get_resolved_action_dir, atomic_write_json
+from project_config import INTENDED_RECEIVER_MODE_MODEL, parse_return_type, get_resolved_action_dir, atomic_write_json
 from datatools.worker_runtime import map_shared_tasks
 from datatools.epv_coverage import (ATTRIBUTE, DIRECTORY, load_annotations, unavailable, mask_targets,
                                    verified_report, label_fingerprint)
@@ -270,8 +270,15 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
             destination = destination.parent.with_name(destination.parent.name.replace(old_ret, ret)) / destination.name
             if (xt_only or target_families is not None) and not destination.is_file():
                 raise FileNotFoundError(f"Missing advertised label variant: {destination}")
-            previous = (template if destination == artifact.path else
-                        torch.load(destination, weights_only=True, map_location="cpu") if destination.exists() else None)
+            # Receiver replacement can change the examples themselves. Only the
+            # regenerated base is a valid template for its set-piece labels.
+            rebuild = (options["rebuild_model_stop_variants"] and condition == "set-pieces"
+                       and artifact.mode == INTENDED_RECEIVER_MODE_MODEL
+                       and artifact.path.parent.name.startswith(("action_labels_", "augmented_labels")))
+            previous = None
+            if not rebuild:
+                previous = (template if destination == artifact.path else
+                            torch.load(destination, weights_only=True, map_location="cpu") if destination.exists() else None)
             if previous is not None and (previous.shape != template.shape
                     or not torch.equal(previous[:, config.LABEL_INDEX["action_index"]], template[:, config.LABEL_INDEX["action_index"]])):
                 raise ValueError(f"Stop variants have different action identities: {destination}")
@@ -350,8 +357,8 @@ def _stage_matches(tasks, workers, thread_limit):
 
 def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, target_families=None,
                    event_dir="data/event_synced", xt_match_dir=None, surface_metadata=None,
-                   num_workers=1, worker_thread_limit=1):
-    """Requests map return names to modes. Graphs and unrelated label columns are untouched."""
+                   num_workers=1, worker_thread_limit=1, rebuild_model_stop_variants=False):
+    """Refresh requested stop targets, rebuilding model set-piece rows after receiver replacement."""
     from datatools.xt_refresh import refresh_inventory, fingerprint, file_signature
     from xt_versions import resolve_xt_version
     from scripts.feature_extension_diagnostics import ExtensionAttempt
@@ -360,6 +367,8 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
     workers = resolve_num_workers(num_workers)
     if worker_thread_limit < 1:
         raise ValueError("--worker-thread-limit must be a positive integer.")
+    if rebuild_model_stop_variants and (xt_only or target_families is not None):
+        raise ValueError("Rebuilding model stop variants requires a full stop-target refresh.")
     root = Path(root)
     attempt = attempt or ExtensionAttempt(root, "stop_conditions", "derived", {})
     inventory, returns, modes, carries = refresh_inventory(root, metadata)
@@ -401,7 +410,8 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
     workers = min(workers, len(inventory))
     report.update(workers=workers, total_matches=len(inventory), completed_matches=0)
     options = dict(requests=requests, returns=returns, xt_only=xt_only, families=families,
-                   target_families=target_families, names=names, settings=settings,
+                   target_families=target_families, rebuild_model_stop_variants=rebuild_model_stop_variants,
+                   names=names, settings=settings,
                    surface_metadata=surface_metadata, event_dir=Path(event_dir), xt_dir=xt_dir,
                    goal_distance_dir=GOAL_DISTANCE_MATCH_DIR, epv_dir=EPV_MATCH_DIR,
                    exclude_empty_windows=exclude_empty_windows)

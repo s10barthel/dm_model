@@ -1693,7 +1693,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                 if getattr(args, "stop_condition", "base") == "set-pieces":
                     for ret in args.requested_return_types:
                         requests.setdefault(ret, []).append("set-pieces")
-                refresh_labels(target_root, stop_metadata, requests, attempt=attempt, **refresh_workers)
+                refresh_labels(target_root, stop_metadata, requests, attempt=attempt,
+                               rebuild_model_stop_variants=plan.regenerate_model_mode, **refresh_workers)
             set_piece_returns = (args.requested_return_types
                 if getattr(args, "stop_condition", "base") == "set-pieces" else [])
             if plan.added_return_types or set_piece_returns:

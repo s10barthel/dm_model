@@ -309,6 +309,121 @@ def test_staged_migration_optional_variants_and_xt_only_refresh(sample, tmp_path
     validate_labels(root, metadata, ["m"], get_action_label_dir("next_3", root=root), "next_3")
 
 
+@pytest.mark.parametrize("in_place", [False, True])
+def test_receiver_replacement_rebuilds_only_model_stop_rows(sample, tmp_path, monkeypatch, in_place):
+    import json
+    import sys
+    import torch
+    import project_config
+    from datatools import config
+    from datatools.artifact_storage import atomic_torch_save
+    from datatools.stop_conditions import label_path, refresh_labels
+    from datatools.xt_refresh import refresh_inventory, fingerprint
+    from scripts import generate_relevant_features as generator
+    from tests.test_feature_run_extension import make_metadata
+
+    root, _, sidecars, metadata, source, _, _ = sample
+    metadata.update(make_metadata(metadata["return_types"], metadata["intended_receiver_modes"],
+                                  "success_intent/old"))
+    metadata.pop("stop_conditions")
+    # The throw-in cuts off the later xT opportunity only for set-piece targets.
+    source = source.assign(object_id="home_1", period_id=1, start_x=10., start_y=20.)
+    source.loc[1, "spadl_type"] = "throw_in"
+    pinned = root / "pass_endpoints"
+    pinned.mkdir()
+    source.drop(columns="xT").to_parquet(pinned / "m.parquet")
+    for path in root.glob("resolved_actions*/m.parquet"):
+        actions = pd.read_parquet(path).assign(object_id="home_1", period_id=1)
+        actions.loc[1, "spadl_type"] = "throw_in"
+        actions.to_parquet(path)
+    monkeypatch.setattr(project_config, "XT_MATCH_DIR", sidecars)
+    monkeypatch.setattr(project_config, "GOAL_DISTANCE_MATCH_DIR", sidecars)
+    monkeypatch.setattr(project_config, "EPV_MATCH_DIR", tmp_path / "epv")
+    annotations = pd.read_csv(sidecars / "m.csv").assign(goal_distance=[.1, .4, .8])
+    annotations.to_csv(sidecars / "m.csv", index=False)
+    requests = {r.removesuffix("_spstop"): ["base"] for r in metadata["return_types"]}
+    requests["next_3"].append("set-pieces")
+    refresh_labels(root, metadata, requests)
+    (root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    inventory, _, _, _ = refresh_inventory(root, metadata)
+    model_labels = {a.path.relative_to(root): torch.load(a.path, weights_only=True)
+                    for a in inventory["m"] if a.mode == "model"}
+    model_inputs = {p.relative_to(root): p.read_bytes() for pattern in
+                    ("resolved_actions_model*/m.parquet", "augmented_graphs_model/m.pt")
+                    for p in root.glob(pattern)}
+    augmented = project_config.get_augmented_label_dir("model", root=root) / "m.pt"
+    augmented_piece = label_path(augmented, root, "set-pieces")
+    carry = project_config.get_action_label_dir("next_3", "model", root=root, use_carries=True) / "m.pt"
+    carry_piece = label_path(carry, root, "set-pieces")
+    original = project_config.get_augmented_label_dir("original", root=root) / "m.pt"
+    original_piece = label_path(original, root, "set-pieces")
+    def load(path):
+        return torch.load(path, weights_only=True)
+
+    if in_place:
+        # An unrelated mismatch must still prevent publication, even during replacement.
+        atomic_torch_save(load(original_piece)[:-1], original_piece)
+    before = {p: fingerprint(p) for p in (augmented_piece, carry_piece, original_piece)}
+
+    target = root if in_place else tmp_path / "derived"
+    intent = config.LABEL_INDEX["intent_index"]
+
+    def generate(steps, attempt):
+        # Simulate the subprocess output while keeping cloning, cleanup and stop staging real.
+        for relative, data in model_inputs.items():
+            path = target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        for relative, labels in model_labels.items():
+            if relative == augmented.relative_to(root):
+                labels = torch.cat([labels[:2], labels[1:]])
+            if relative == carry.relative_to(root):
+                labels = labels.clone()
+                labels[0, intent] += 1
+            atomic_torch_save(labels, target / relative)
+        if not in_place:
+            with pytest.raises(ValueError, match="different action identities"):
+                refresh_labels(target, metadata, {"next_3": ["set-pieces"]})
+
+    monkeypatch.setattr(generator, "resolve_feature_run_id", lambda *a, **kw: root.name)
+    monkeypatch.setattr(generator, "load_feature_run_metadata", lambda *a, **kw: metadata)
+    monkeypatch.setattr(generator, "get_feature_run_root", lambda run: tmp_path / run)
+    monkeypatch.setattr(generator, "resolve_split_manifest", lambda **kw: {
+        "manifest_id": "fixture", "metadata": {"universe_count": 1},
+    })
+    monkeypatch.setattr(generator, "run_generation_steps", generate)
+    monkeypatch.setattr(generator, "audit_receiver_extension", lambda plan: None)
+    published = []
+    monkeypatch.setattr(generator, "write_latest_run", lambda kind, run: published.append(run))
+    monkeypatch.setattr(sys, "argv", ["generate", "--extend-feature-run-id", root.name,
+                        "--replace-intended-receiver-model", "--intended-receiver-model-id", "success_intent/new",
+                        *(["--in-place"] if in_place else ["--run-id", target.name])])
+    if in_place:
+        with pytest.raises(ValueError, match=r"different action identities.*augmented_labels[\\/]m\.pt"):
+            generator.main()
+        result = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
+        assert result["status"] == "failed"
+        assert result["extension_attempt"]["completed_replacements"] == 0
+        assert not published
+    else:
+        generator.main()
+        result = json.loads((target / "metadata.json").read_text(encoding="utf-8"))
+        assert result["status"] == "completed"
+        assert result["intended_receiver_model_id"] == "success_intent/new"
+        assert published == [target.name]
+        base = load(target / augmented.relative_to(root))
+        pieces = load(target / augmented_piece.relative_to(root))
+        assert len(pieces) == len(base) == len(load(augmented_piece)) + 1
+        torch.testing.assert_close(pieces[:, :17], base[:, :17])
+        assert base[0, config.LABEL_INDEX["scores_xt"]] > pieces[0, config.LABEL_INDEX["scores_xt"]]
+        carried = load(target / carry_piece.relative_to(root))
+        torch.testing.assert_close(carried[:, :17], load(target / carry.relative_to(root))[:, :17])
+        assert carried[0, intent] != load(carry_piece)[0, intent]
+        assert fingerprint(target / original_piece.relative_to(root)) == before[original_piece]
+    assert all(fingerprint(path) == digest for path, digest in before.items())
+
+
 def test_cli_set_piece_requires_explicit_returns_and_migration_is_separate(monkeypatch):
     import sys
     from scripts.generate_relevant_features import parse_args
