@@ -2752,7 +2752,8 @@ checkpoint pass-success predictions are available.
 - `--component-run-id <component_run_id>`: versioned Hawkeye component run to visualize. Default: latest successful Hawkeye component run.
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
+- `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/preprocessed_coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
+- `--coach-ratings-mrp <name>`: with `--coach-ratings`, restrict both eligible situations and displayed ratings to this MRP, for example `--coach-ratings --coach-ratings-mrp jelle`. Matching ignores case and surrounding whitespace. Supported in standard, loc, and freeze modes; omitted by default to include all MRPs. Explicit situation IDs intersect with this filter. In loc/freeze modes, `--limit` applies before the ratings filter, so fewer rows may render. Run metadata records the MRP and scored-row counts before and after filtering.
 - `--selections`: add `CAVE | HMD` selection labels from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off. The `pass_score` title shows the per-setting denominators as `Selections (CAVE n=<count> | HMD n=<count>)`.
 - `--selection-format {counts,percentages}`: format `--selections` labels as raw counts such as `10 | 14` (default), or rounded percentages such as `45% | 64%`.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.

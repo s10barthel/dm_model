@@ -116,6 +116,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Add coach ratings below player pass-score annotations.",
     )
     parser.add_argument(
+        "--coach-ratings-mrp",
+        help="With --coach-ratings, restrict situations and rating annotations to this MRP (case-insensitive).",
+    )
+    parser.add_argument(
         "--selections",
         action="store_true",
         help="Add CAVE | HMD selection labels below pass-intent and pass-score annotations.",
@@ -155,6 +159,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
     args = parser.parse_args(argv)
+    if args.coach_ratings_mrp is not None:
+        args.coach_ratings_mrp = args.coach_ratings_mrp.strip().casefold()
+        if not args.coach_ratings_mrp:
+            parser.error("--coach-ratings-mrp must not be empty")
+        if not args.coach_ratings:
+            parser.error("--coach-ratings-mrp requires --coach-ratings")
     from scripts.outcome_decomposition_visualization import validate_options
     try:
         validate_options(args)
@@ -547,6 +557,7 @@ def run_location_visualization(
     overlay_data = load_overlay_data(
         include_coach_ratings=bool(args.coach_ratings),
         include_selections=bool(args.selections),
+        coach_ratings_mrp=getattr(args, "coach_ratings_mrp", None),
     )
     coach_rating_filter: dict[str, object] | None = None
     if bool(args.coach_ratings):
@@ -555,6 +566,7 @@ def run_location_visualization(
         eligible_set = set(eligible_ids)
         selected_rows = selected_rows.loc[selected_rows["_action_id"].isin(eligible_set)].copy()
         coach_rating_filter = {
+            "mrp": getattr(args, "coach_ratings_mrp", None),
             "candidate_situation_ids": candidate_ids,
             "eligible_situation_ids": eligible_ids,
             "skipped_situation_ids": skipped_ids,
@@ -563,7 +575,9 @@ def run_location_visualization(
             "skipped_count": len(skipped_ids),
         }
         if selected_rows.empty:
-            raise ValueError("No coach-rated Hawkeye situations were found among the selected location rows.")
+            mrp = getattr(args, "coach_ratings_mrp", None)
+            detail = f" with mrp={mrp!r}" if mrp is not None else ""
+            raise ValueError(f"No coach-rated Hawkeye situations{detail} were found among the selected location rows.")
 
     component_names = list(component_selection.rendered_components)
     rendered_situations: list[dict[str, object]] = []
@@ -913,6 +927,7 @@ def main() -> None:
     overlay_data = load_overlay_data(
         include_coach_ratings=bool(getattr(args, "coach_ratings", False)),
         include_selections=bool(getattr(args, "selections", False)),
+        coach_ratings_mrp=getattr(args, "coach_ratings_mrp", None),
     )
     coach_rating_filter: dict[str, object] | None = None
     if bool(getattr(args, "coach_ratings", False)):
@@ -922,6 +937,7 @@ def main() -> None:
             overlay_data.coach_ratings,
         )
         coach_rating_filter = {
+            "mrp": getattr(args, "coach_ratings_mrp", None),
             "candidate_situation_ids": candidate_situation_ids,
             "eligible_situation_ids": situation_ids,
             "skipped_situation_ids": skipped_situation_ids,
@@ -930,7 +946,9 @@ def main() -> None:
             "skipped_count": len(skipped_situation_ids),
         }
         if not situation_ids:
-            raise ValueError("No coach-rated Hawkeye situations were found among the selected component situations.")
+            mrp = getattr(args, "coach_ratings_mrp", None)
+            detail = f" with mrp={mrp!r}" if mrp is not None else ""
+            raise ValueError(f"No coach-rated Hawkeye situations{detail} were found among the selected component situations.")
 
     component_names = list(component_selection.rendered_components)
     rendered_situations: list[dict[str, object]] = []

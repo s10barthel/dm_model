@@ -74,7 +74,9 @@ def _normalize_counts(series: pd.Series) -> pd.Series:
     return normalized.astype(int)
 
 
-def load_coach_ratings(path: str | Path = COACH_RATINGS_PATH) -> tuple[pd.DataFrame, dict[str, object]]:
+def load_coach_ratings(
+    path: str | Path = COACH_RATINGS_PATH, *, mrp: str | None = None
+) -> tuple[pd.DataFrame, dict[str, object]]:
     resolved_path = Path(path).expanduser().resolve()
     coach_ratings = pd.read_csv(resolved_path, low_memory=False)
     _validate_columns(coach_ratings, ["id", "uefa_player_id", "Scores", "team"], "Coach ratings")
@@ -88,10 +90,21 @@ def load_coach_ratings(path: str | Path = COACH_RATINGS_PATH) -> tuple[pd.DataFr
     normalized["Scores"] = pd.to_numeric(normalized["Scores"], errors="coerce")
     normalized = normalized.dropna(subset=["id", "uefa_player_id", "team", "Scores"]).copy()
     normalized["uefa_player_id"] = normalized["uefa_player_id"].astype(int)
+    scored_rows_before_mrp = len(normalized)
+    if mrp is not None:
+        mrp = mrp.strip().casefold()
+        if not mrp:
+            raise ValueError("Coach ratings MRP must not be empty.")
+        _validate_columns(normalized, ["mrp"], "Coach ratings")
+        normalized = normalized.loc[
+            _normalize_text_id(normalized["mrp"]).str.casefold().eq(mrp).fillna(False)
+        ].copy()
     return normalized, {
         "path": str(resolved_path),
         "rows_read": len(coach_ratings),
         "scored_rows": len(normalized),
+        "mrp": mrp,
+        "scored_rows_before_mrp": scored_rows_before_mrp,
     }
 
 
@@ -131,7 +144,9 @@ def load_selection_proportions(path: str | Path = SELECTIONS_PATH) -> tuple[pd.D
     }
 
 
-def load_overlay_data(*, include_coach_ratings: bool, include_selections: bool) -> OverlayData:
+def load_overlay_data(
+    *, include_coach_ratings: bool, include_selections: bool, coach_ratings_mrp: str | None = None
+) -> OverlayData:
     coach_ratings = pd.DataFrame(columns=["id", "uefa_player_id", "team", "Scores"])
     selections = pd.DataFrame(columns=["action_id", "SelectedPlayer", "setting", "n", "proportion"])
     metadata: dict[str, object] = {
@@ -139,7 +154,7 @@ def load_overlay_data(*, include_coach_ratings: bool, include_selections: bool) 
         "selections_enabled": bool(include_selections),
     }
     if include_coach_ratings:
-        coach_ratings, coach_metadata = load_coach_ratings()
+        coach_ratings, coach_metadata = load_coach_ratings(mrp=coach_ratings_mrp)
         metadata["coach_ratings"] = coach_metadata
     if include_selections:
         selections, selection_metadata = load_selection_proportions()

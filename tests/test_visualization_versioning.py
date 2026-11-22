@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from PIL import Image
 
 import project_config
@@ -17,6 +18,8 @@ from scripts import run_and_visualize_hawkeye
 from scripts import visualize_action_components
 from scripts import visualize_benchmark
 from scripts import visualize_hawkeye
+from scripts import hawkeye_visualization_overlays as overlays
+from scripts import visualize_hawkeye as viz
 from scripts import visualize_skillcorner
 from scripts.hawkeye_visualization_overlays import (
     OverlayData,
@@ -1843,3 +1846,91 @@ class HawkeyeTrackingOnlyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def write_ratings(path):
+    pd.DataFrame({
+        "id": ["shared", "shared", "unscored", "patrick-only", "missing-mrp", "invalid"],
+        "uefa_player_id": [7, 7, 8, 9, 10, 11],
+        "team": ["A", "A", "A", "A", "A", None],
+        "Scores": [4, 2, None, 3, 5, 1],
+        "mrp": [" Jelle ", "patrick", "jelle", "patrick", None, "jelle"],
+    }).to_csv(path, index=False)
+
+
+def test_mrp_filters_scored_rows_situations_and_annotations(tmp_path, monkeypatch):
+    path = tmp_path / "ratings.csv"
+    write_ratings(path)
+    original_loader = overlays.load_coach_ratings
+    monkeypatch.setattr(overlays, "load_coach_ratings", lambda **kw: original_loader(path, **kw))
+    data = overlays.load_overlay_data(
+        include_coach_ratings=True, include_selections=False, coach_ratings_mrp=" JELLE "
+    )
+    assert data.coach_ratings["Scores"].tolist() == [4]
+    assert overlays.filter_coach_rated_situation_ids(
+        ["patrick-only", "unscored", "shared", "missing-mrp"], data.coach_ratings
+    ) == (["shared"], ["patrick-only", "unscored", "missing-mrp"])
+    situation = SimpleNamespace(
+        team_map={"A": "home"}, tracking=pd.DataFrame({"home_7_x": [0.0]})
+    )
+    scores, _, _ = overlays.build_situation_overlays(
+        data, "shared", pd.DataFrame({"team": ["A"], "uefa_player_id": [7]}), situation
+    )
+    assert scores.to_dict() == {"home_7": 4.0}
+    metadata = data.metadata["coach_ratings"]
+    assert metadata["mrp"] == "jelle"
+    assert metadata["rows_read"] == 6
+    assert metadata["scored_rows_before_mrp"] == 4
+    assert metadata["scored_rows"] == 1
+
+
+def test_no_filter_and_missing_mrp_column(tmp_path):
+    path = tmp_path / "ratings.csv"
+    write_ratings(path)
+    ratings, _ = overlays.load_coach_ratings(path)
+    assert len(ratings) == 4
+    empty, metadata = overlays.load_coach_ratings(path, mrp="unknown")
+    assert empty.empty
+    assert metadata["scored_rows"] == 0
+    pd.read_csv(path).drop(columns="mrp").to_csv(path, index=False)
+    assert len(overlays.load_coach_ratings(path)[0]) == 4
+    with pytest.raises(KeyError, match="mrp"):
+        overlays.load_coach_ratings(path, mrp="jelle")
+
+
+@pytest.mark.parametrize("mode", ["standard", "loc", "freeze"])
+def test_mrp_cli(mode):
+    args = viz.parse_args(["--mode", mode, "--coach-ratings", "--coach-ratings-mrp", " JELLE "])
+    assert args.coach_ratings_mrp == "jelle"
+    assert viz.parse_args(["--mode", mode]).coach_ratings_mrp is None
+    with pytest.raises(SystemExit):
+        viz.parse_args(["--mode", mode, "--coach-ratings-mrp", "jelle"])
+    with pytest.raises(SystemExit):
+        viz.parse_args(["--mode", mode, "--coach-ratings", "--coach-ratings-mrp", " "])
+
+
+@pytest.mark.parametrize("mode", ["standard", "loc", "freeze"])
+def test_render_paths_pass_filter_and_report_no_matches(mode, tmp_path, monkeypatch):
+    args = viz.parse_args([
+        "--mode", mode, "--component-dir", str(tmp_path), "--output-dir", str(tmp_path),
+        "--coach-ratings", "--coach-ratings-mrp", "jelle", "--situation-id", "unscored",
+    ])
+    monkeypatch.setattr(viz, "parse_args", lambda: args)
+    export = pd.DataFrame({
+        "selection_row_id": [1], "original_action_id": ["unscored"],
+        "PositionX": [0], "PositionY": [0], "resolved_time_norm": [0],
+        "loc_situation_id": ["loc-unscored"],
+    })
+    monkeypatch.setattr(viz, "load_hawkeye_component_run", lambda _: (export, {"inference_mode": mode}))
+    monkeypatch.setattr(viz, "select_saved_components", lambda *a, **kw: (None, None))
+    monkeypatch.setattr(viz, "load_hawkeye_tracking", lambda _: pd.DataFrame())
+    monkeypatch.setattr(viz, "clean_hawkeye_tracking", lambda df: df)
+    monkeypatch.setattr(viz, "load_hawkeye_ball", lambda _: pd.DataFrame())
+    monkeypatch.setattr(viz, "clean_hawkeye_ball", lambda df: df)
+    monkeypatch.setattr(viz, "resolve_hawkeye_component_situation_ids", lambda *a, **kw: ["unscored"])
+    path = tmp_path / "ratings.csv"
+    write_ratings(path)
+    original_loader = overlays.load_coach_ratings
+    monkeypatch.setattr(overlays, "load_coach_ratings", lambda **kw: original_loader(path, **kw))
+    with pytest.raises(ValueError, match="No coach-rated Hawkeye situations with mrp='jelle'"):
+        viz.main()
