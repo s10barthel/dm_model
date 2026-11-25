@@ -108,9 +108,11 @@ from scripts.visualization_receivers import (
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
+from scripts.visualization_field_of_view import CoveringSector, add_field_of_view_argument, sportec_field_of_view
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser)
     parser.add_argument("--decomposition", action="store_true", help="Add occurrence x severity labels to individual outcomes from decomposition checkpoints; other selected plots render normally.")
     parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
@@ -648,6 +650,7 @@ def render_component(
     compare_intended_receiver: bool = False,
     overlays: ActionOverlays | None = None,
     return_image: bool = False,
+    field_of_view: CoveringSector | None = None,
 ) -> Image.Image | None:
     action = match.actions.loc[action_index]
     frame_id = int(action["frame_id"])
@@ -687,6 +690,7 @@ def render_component(
         attacking_team_prefix=attacking_prefix,
         player_rings=player_rings,
         pass_endpoint_xy=overlays.endpoint_xy,
+        field_of_view=field_of_view,
     )
 
     rotate_pitch = attacking_prefix == "away"
@@ -946,6 +950,7 @@ def render_action_components(
     pass_endpoint: bool = True,
     compare_intended_receiver: bool = False,
     comparison_xpass=None,
+    field_of_view: bool = False,
 ) -> None:
     component_prob_rows = collect_action_components(
         match, loaded_models, feature_root, device, action_index, display_action_id, output_dir,
@@ -974,6 +979,7 @@ def render_action_components(
         match, action_index, component_prob_rows.get("success_intent"),
         pass_endpoint=pass_endpoint, compare_intended_receiver=compare_intended_receiver,
     )
+    sector = sportec_field_of_view(match, action_index, field_of_view)
     if COMPARISON_COMPONENT in component_order:
         def render_selected_component(component_name):
             return render_component(
@@ -982,6 +988,7 @@ def render_action_components(
                 output_path=output_dir / f"{component_name}.png", show_trajectories=show_trajectories,
                 pass_endpoint=pass_endpoint, compare_intended_receiver=compare_intended_receiver,
                 overlays=overlays, return_image=True,
+                field_of_view=sector,
             )
         save_component_pngs(component_order, render_selected_component, output_dir)
         return
@@ -999,6 +1006,7 @@ def render_action_components(
             pass_endpoint=pass_endpoint,
             compare_intended_receiver=compare_intended_receiver,
             overlays=overlays,
+            field_of_view=sector,
         )
 
 
@@ -1246,6 +1254,7 @@ def main() -> None:
                 pass_endpoint=getattr(args, "pass_endpoint", True),
                 compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
                 comparison_xpass=comparison_xpass,
+                field_of_view=getattr(args, "field_of_view", False),
             )
         except PCXPassBlendingError:
             raise

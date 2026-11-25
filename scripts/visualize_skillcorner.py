@@ -62,9 +62,11 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+from scripts.visualization_field_of_view import CoveringSector, add_field_of_view_argument, skillcorner_field_of_view
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser)
     add_compare_argument(parser)
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
@@ -112,6 +114,7 @@ def render_frame_image(
     probs: pd.Series | None,
     show_trajectories: bool = False,
     comparison: bool = False,
+    field_of_view: CoveringSector | None = None,
 ) -> Image.Image:
     history_frames = max(int(round(possession.fps)) - 1, 0)
     snapshot_start = max(frame_id - history_frames, int(possession.tracking.index.min()))
@@ -152,6 +155,7 @@ def render_frame_image(
         show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
+        field_of_view=field_of_view,
     )
 
     title = f"{possession.match_id} | possession {possession.event_index} | frame {frame_id} | {component_name.replace('_', ' ').title()}"
@@ -268,6 +272,8 @@ def render_possession(
     component_names = list(rendered_components)
     selected_output_mode = output_mode(args)
     selected_frames = resolve_skillcorner_png_frames(frame_ids, args) if selected_output_mode == "png" else []
+    selected_frame_ids = [int(item["frame_id"]) for item in selected_frames] if selected_output_mode == "png" else frame_ids
+    sectors = skillcorner_field_of_view(context, possession, selected_frame_ids, getattr(args, "field_of_view", False))
 
     for component_name in COMPONENT_COLUMNS:
         if component_name not in possession_component_tables:
@@ -283,7 +289,6 @@ def render_possession(
 
     if needs_physical_xpass(args):
         pass_success = possession_component_tables.get("pass_success", pd.DataFrame())
-        selected_frame_ids = [int(selection["frame_id"]) for selection in selected_frames] if selected_output_mode == "png" else frame_ids
         physical_frame_ids = (
             [int(index) for index in pass_success.index.tolist()]
             if not pass_success.empty
@@ -311,6 +316,7 @@ def render_possession(
                     component_name,
                     probs,
                     show_trajectories=args.show_trajectories,
+                    field_of_view=sectors.get(frame_id),
                 )
             output_paths.extend(save_component_pngs(
                 component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
@@ -326,6 +332,7 @@ def render_possession(
                         component_name,
                         probs,
                         show_trajectories=args.show_trajectories,
+                        field_of_view=sectors.get(frame_id),
                     )
 
             output_path = output_dir / f"{component_name}.{selected_output_mode}"

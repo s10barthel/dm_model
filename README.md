@@ -888,6 +888,26 @@ python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle
 
 `loc` and `freeze` automatically use pc-xPass caches and require a matching location-component run: its `metadata.json` must have `inference_mode` equal to the requested visualization mode.
 
+#### Field-of-view overlay
+
+Add `--field-of-view` (off by default) to show the smallest sector containing all other
+outfield players on both teams, viewed from the designated recipient. The sector is
+drawn from the displayed coordinates and clipped to the pitch, behind players and the
+ball. PNGs use the selected tracking frame; GIFs and MP4s update the sector each frame.
+
+```powershell
+python scripts/visualize_hawkeye.py --only-tracking --situation-id <hawkeye_id> --output png --field-of-view
+python scripts/visualize_hawkeye.py --only-tracking --situation-id <hawkeye_id> --output mp4 --field-of-view
+```
+
+HawkEye uses the clip's `PlayerID` and tracked roles, including before receipt. This
+also works with direct inference, coach-rating visualizations, and comparison panels.
+Sportec action PNGs use the confirmed teammate recipient of a completed pass or cross.
+SkillCorner uses `player_targeted_id` for a completed outgoing pass with a matched
+reception. Incomplete or ambiguous frames are rendered without the sector. Benchmark
+states lack a designated recipient, so the flag reports that limitation. None of
+these paths substitutes the possessor.
+
 ### 9. Run benchmark inference on local benchmark data
 
 ```powershell

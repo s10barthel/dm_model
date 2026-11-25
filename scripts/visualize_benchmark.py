@@ -60,9 +60,11 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+from scripts.visualization_field_of_view import add_field_of_view_argument, report_unsupported_field_of_view
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser, unavailable="benchmark game states")
     add_compare_argument(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "benchmark"))
     parser.add_argument("--modification", action="append", type=int, help="Restrict visualization to one or more benchmark modifications.")
@@ -208,6 +210,7 @@ def _probs_for_component_frame(
 
 def main() -> None:
     args = parse_args()
+    report_unsupported_field_of_view(args, "benchmark game states")
     if getattr(args, "visualization_comparison", None):
         from scripts.saved_visualization_comparison import run_comparison
         run_comparison(args, sys.modules[__name__])

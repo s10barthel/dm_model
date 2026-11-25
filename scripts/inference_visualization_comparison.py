@@ -37,6 +37,9 @@ from scripts.inference_components import (
 )
 from scripts.visualization_availability import select_inference_components, finish_inference_selection
 from scripts.visualization_selection import selection_metadata
+from scripts.visualization_field_of_view import (
+    hawkeye_field_of_view, prepare_hawkeye_visualization_tracking, sportec_field_of_view,
+)
 
 
 DERIVED_OUTCOMES = {"outcome_success", "outcome_failure", "pass_score"}
@@ -332,7 +335,9 @@ def _configure_variant(variant):
 
 
 def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=False):
-    tracking = mod.clean_hawkeye_tracking(mod.load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        mod.load_hawkeye_tracking(args.tracking_csv), mod.clean_hawkeye_tracking, args,
+    )
     ball = mod.clean_hawkeye_ball(mod.load_hawkeye_ball(args.ball_csv))
     ids = mod.resolve_hawkeye_situation_ids(tracking,
         requested_ids=[str(item) for item in (args.situation_id or []) + (args.action_id or [])])
@@ -351,6 +356,7 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
                 **runtime_graph_feature_kwargs({(i, key): model for i, variant in enumerate(variants) for key, model in variant.models.items()}))
             selected_frames = mod.resolve_hawkeye_png_frames(subject, mod.resolve_ballreceipt(scene_tracking), mod.requested_time_norms(args))
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
+            sectors = hawkeye_field_of_view(fov_source, subject, frames)
             tables, cache, physical_tables = [], {}, {}
             for variant in variants:
                 with active_variant(variant, f"situation {identifier}, frames {frames}"):
@@ -376,9 +382,10 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
                        "suffix": "_" + selected["label"], "title": f"{identifier} | {subject.frame_meta.at[frame, 'abs_time']:.3f}",
                        "selection_denominators": stats["selection_denominators"] if args.selections else None,
                        "geometry": {"selected_frame": selected, "freeze_ballreceipt": args.freeze_ballreceipt},
-                       "render": lambda component, row, subject=subject, frame=frame, overlay_kwargs=overlay_kwargs:
+                       "render": lambda component, row, subject=subject, frame=frame, overlay_kwargs=overlay_kwargs,
+                                        sector=sectors.get(frame):
                            mod.render_frame_image(subject, frame, component, row, show_trajectories=args.show_trajectories,
-                                                  comparison=True, **overlay_kwargs)}
+                                                  comparison=True, field_of_view=sector, **overlay_kwargs)}
 
         group = ComparisonGroup(('hawkeye', str(identifier)), load_group)
         if deferred:
@@ -446,13 +453,14 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                     panel_tables[component] = table
                 tables.append(panel_tables)
             action = subject.actions.loc[action_index]
+            sector = sportec_field_of_view(subject, action_index, getattr(args, "field_of_view", False))
             yield {"scene": f"{args.match_id}/action_{display_id}", "frame": frame, "tables": tables,
                    "folder": str(Path(str(args.match_id)) / str(display_id)), "suffix": "",
                    "title": f"{action['spadl_type']} {display_id}",
                    "geometry": {"match_id": str(args.match_id), "action_id": str(display_id), "action_index": int(action_index)},
                    "render": lambda component, row, action_index=action_index, display_id=display_id:
                        mod.render_component(subject, action_index, display_id, component, row, Path(args.output_dir),
-                                            show_trajectories=args.show_trajectories, comparison=True,
+                                            show_trajectories=args.show_trajectories, comparison=True, field_of_view=sector,
                                             pass_endpoint=getattr(args, "pass_endpoint", True),
                                             compare_intended_receiver=getattr(args, "compare_intended_receiver", False))}
 

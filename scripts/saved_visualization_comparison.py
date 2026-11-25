@@ -9,6 +9,9 @@ import pandas as pd
 from models.inference_masks import flatten_mask_values
 from scripts.saved_visualization_xpass import resolve_saved_xpass, saved_xpass_metadata
 from scripts.visualization_availability import select_saved_components, saved_component_inputs
+from scripts.visualization_field_of_view import (
+    hawkeye_field_of_view, prepare_hawkeye_visualization_tracking, skillcorner_field_of_view,
+)
 from scripts.visualization_selection import (
     bind_component_selection, filter_component_selection, selection_metadata, source_inputs,
 )
@@ -110,7 +113,9 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
     if "physical_xpass" in names and xpass_settings is None:
         dataset = "hawkeye_loc" if args.mode in {"loc", "freeze"} else "hawkeye"
         xpass_settings = [resolve_saved_xpass(args, info, dataset) for info in metadata]
-    tracking = mod.clean_hawkeye_tracking(mod.load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        mod.load_hawkeye_tracking(args.tracking_csv), mod.clean_hawkeye_tracking, args,
+    )
     ball = mod.clean_hawkeye_ball(mod.load_hawkeye_ball(args.ball_csv))
     overlay_data = mod.load_overlay_data(include_coach_ratings=args.coach_ratings, include_selections=args.selections)
     mode = args.mode
@@ -159,6 +164,7 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
             times = [key[1]] if location_rows is not None else mod.requested_time_norms(args)
             selected_frames = mod.resolve_hawkeye_png_frames(subject, mod.resolve_ballreceipt(scene_tracking), times)
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
+            sectors = hawkeye_field_of_view(fov_source, subject, frames)
             tables, selected_raw = [], []
             for index, raw in enumerate(exports):
                 rows = raw.loc[raw.id.eq(identifier)].copy() if raw is not None else None
@@ -189,9 +195,10 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
                         "selection_denominators": overlay_kwargs["selection_denominators"] if args.selections else None,
                         "title": f"{identifier} | {time:.3f}", "geometry": {"location_key": key, "selected_frame": selected,
                             "freeze_ballreceipt": True if location_rows is not None else bool(metadata[0].get("freeze_ballreceipt", True))},
-                        "render": lambda component, row, subject=subject, frame=frame, overlays=overlay_kwargs:
+                        "render": lambda component, row, subject=subject, frame=frame, overlays=overlay_kwargs,
+                                         sector=sectors.get(frame):
                             mod.render_frame_image(subject, frame, component, row, show_trajectories=args.show_trajectories,
-                                                   comparison=True, **overlays)}]
+                                                   comparison=True, field_of_view=sector, **overlays)}]
 
         group = ComparisonGroup(('hawkeye', key), load_group)
         if deferred:
@@ -256,6 +263,7 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False, x
             if not selected_frames:
                 raise ValueError(f"No frames for SkillCorner possession {index}.")
             frames = [int(item["frame_id"]) for item in selected_frames]
+            sectors = skillcorner_field_of_view(context, subject, frames, getattr(args, "field_of_view", False))
             tables, scope_reference = [], {}
             for variant_index, raw_tables in enumerate(exports):
                 table = {}
@@ -298,9 +306,9 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False, x
                 yield [{"scene": f"{args.match_id}/possession_{index}", "frame": frame, "tables": tables,
                     "folder": str(Path(str(args.match_id)) / str(index)), "suffix": "_" + selected["label"],
                     "title": f"{args.match_id} | possession {index} | frame {frame}", "geometry": {"selected_frame": selected},
-                    "render": lambda component, row, subject=subject, frame=frame: mod.render_frame_image(
+                    "render": lambda component, row, subject=subject, frame=frame, sector=sectors.get(frame): mod.render_frame_image(
                         subject, frame, component, row.drop(index="home_goal", errors="ignore"),
-                        show_trajectories=args.show_trajectories, comparison=True)}]
+                        show_trajectories=args.show_trajectories, comparison=True, field_of_view=sector)}]
 
         group = ComparisonGroup(('skillcorner', str(args.match_id), index), load_group)
         if deferred:

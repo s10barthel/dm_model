@@ -14,6 +14,7 @@ from matplotlib.patches import Arc, Circle, Rectangle
 
 import datatools.matplotsoccer as mps
 from datatools import config
+from datatools.field_of_view import CoveringSector, draw_covering_sector
 
 COMPONENT_CMAP = mpl.colors.LinearSegmentedColormap.from_list(
     "component_orange_red",
@@ -69,6 +70,7 @@ class SnapshotVisualizer:
         show_missing_annotations: bool = False,
         player_rings: Dict[str, List[Tuple[str, float]]] = None,
         pass_endpoint_xy: Tuple[float, float] = None,
+        field_of_view: CoveringSector | None = None,
     ):
         self.snapshot = snapshot.copy()
         self.sizes = player_sizes
@@ -91,6 +93,7 @@ class SnapshotVisualizer:
         self.show_missing_annotations = show_missing_annotations
         self.player_rings = player_rings or {}
         self.pass_endpoint_xy = pass_endpoint_xy
+        self.field_of_view = field_of_view
 
         if unnormalize:
             x_cols = [c for c in self.snapshot.columns if c.endswith("_x")]
@@ -547,6 +550,14 @@ class SnapshotVisualizer:
 
         fig, ax = plt.subplots(figsize=figsize)
         self._draw_pitch(fig, ax, profile)
+        sector = self.field_of_view
+        cone_drawn = False
+        if sector is not None:
+            if rotate_pitch:
+                sector = sector.rotated(config.FIELD_SIZE)
+            cone_drawn = draw_covering_sector(
+                ax, sector, config.FIELD_SIZE, pitch_control=self.heatmap is not None,
+            ) is not None
 
         if half == "left":
             ax.set_xlim(-4, config.FIELD_SIZE[0] / 2)
@@ -697,7 +708,8 @@ class SnapshotVisualizer:
                     edgecolor = away_colors if isinstance(away_colors, str) else "dimgray"
                 else:
                     edgecolor = "dimgray"
-                ax.plot(edge_x, edge_y, color=edgecolor, linewidth=2, alpha=0.5, zorder=-100)
+                ax.plot(edge_x, edge_y, color=edgecolor, linewidth=2, alpha=0.5,
+                        zorder=-0.25 if cone_drawn else -100)
 
         if self.arrows is not None:
             for src, dst in self.arrows:
@@ -726,7 +738,8 @@ class SnapshotVisualizer:
 
         if self.heatmap is not None:
             hm_extent = (0, config.FIELD_SIZE[0], 0, config.FIELD_SIZE[1])
-            ax.imshow(self.heatmap, cmap=hm_cmap, vmin=cmin, vmax=cmax, extent=hm_extent, alpha=0.7, zorder=0)
+            ax.imshow(self.heatmap, cmap=hm_cmap, vmin=cmin, vmax=cmax, extent=hm_extent, alpha=0.7,
+                      zorder=-1 if cone_drawn else 0)
 
         if len(home_xy.columns) > 0:
             self.plot_team_players(ax, home_xy, home_sizes, home_colors, profile, anonymize, annotate)

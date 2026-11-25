@@ -32,6 +32,9 @@ from hawkeye import (
 )
 from viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from viz_snapshot import SnapshotVisualizer
+from scripts.visualization_field_of_view import (
+    CoveringSector, add_field_of_view_argument, hawkeye_field_of_view, prepare_hawkeye_visualization_tracking,
+)
 
 
 COACH_RATINGS_PATH = (
@@ -51,6 +54,7 @@ ANIMATION_FPS = 25.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser)
     parser.add_argument(
         "--situation-id",
         action="append",
@@ -312,6 +316,7 @@ def render_frame_image(
     probs: pd.Series | None,
     show_trajectories: bool = False,
     tight: bool = True,
+    field_of_view: CoveringSector | None = None,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -345,6 +350,7 @@ def render_frame_image(
         highlight_players=highlight_players,
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
+        field_of_view=field_of_view,
     )
 
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type="pass_score", show=False)
@@ -374,6 +380,7 @@ def save_ballreceipt_snapshot(
     coach_scores: pd.Series,
     component_tables: dict[str, pd.DataFrame],
     show_trajectories: bool,
+    field_of_view: CoveringSector | None = None,
 ) -> None:
     probs = probs_for_pass_score_frame(component_tables, ballreceipt_frame_id)
     image = render_frame_image(
@@ -382,6 +389,7 @@ def save_ballreceipt_snapshot(
         coach_scores,
         probs,
         show_trajectories=show_trajectories,
+        field_of_view=field_of_view,
     )
     image.save(output_root / f"{situation_id}.png")
 
@@ -399,7 +407,9 @@ def main() -> None:
         args.situation_id,
     )
 
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        load_hawkeye_tracking(args.tracking_csv), clean_hawkeye_tracking, args,
+    )
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     output_root = Path(args.output_dir).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -421,6 +431,7 @@ def main() -> None:
         coach_scores = build_coach_score_series(scored_coach_ratings, situation, situation_id)
         frame_ids = get_frame_ids_for_window(situation, ballreceipt)
         ballreceipt_frame_id = get_ballreceipt_frame_id(situation, ballreceipt)
+        sectors = hawkeye_field_of_view(fov_source, situation, [*frame_ids, ballreceipt_frame_id])
 
         def iter_images():
             for frame_id in frame_ids:
@@ -432,6 +443,7 @@ def main() -> None:
                     probs,
                     show_trajectories=args.show_trajectories,
                     tight=False,
+                    field_of_view=sectors.get(frame_id),
                 )
 
         animation_path = output_root / f"{situation_id}.{suffix}"
@@ -444,6 +456,7 @@ def main() -> None:
             coach_scores,
             component_tables,
             show_trajectories=args.show_trajectories,
+            field_of_view=sectors.get(ballreceipt_frame_id),
         )
         print(f"Saved coach-rating visualizations to {animation_path} and {output_root / f'{situation_id}.png'}")
 

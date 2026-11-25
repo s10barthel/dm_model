@@ -71,10 +71,11 @@ The script writes one animation and one BallReceipt snapshot per selected situat
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `dm_model/hawkeye_data/centroid_data_team.csv`.
 - `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `dm_model/hawkeye_data/ball_data_selected.csv`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--field-of-view`: draw the designated recipient's minimum horizontal covering sector in the animation and snapshot. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
 - `--output-dir <path>`: visualization output directory. Default: `coach_ratings/visualizations`.
 
-`--situation-id`, `--tracking-csv`, `--ball-csv`, `--show-trajectories`, `--gif`, and `--output-dir` apply to `visualize_coach_ratings.py`.
+`--situation-id`, `--tracking-csv`, `--ball-csv`, `--show-trajectories`, `--field-of-view`, `--gif`, and `--output-dir` apply to `visualize_coach_ratings.py`.
 
 ## Outputs
 

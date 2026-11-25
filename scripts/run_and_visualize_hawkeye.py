@@ -104,9 +104,13 @@ from scripts.visualize_hawkeye import (
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
+from scripts.visualization_field_of_view import (
+    CoveringSector, add_field_of_view_argument, hawkeye_field_of_view, prepare_hawkeye_visualization_tracking,
+)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser)
     parser.add_argument("--decomposition", action="store_true", help="Add occurrence x severity labels to individual outcomes from decomposition checkpoints; other selected plots render normally.")
     parser.add_argument("--export-outcome-decomposition", action="store_true", help="Export occurrence and conditional severity predictions.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
@@ -245,6 +249,7 @@ def render_frame_image(
     selections_enabled: bool = False,
     selection_denominators: dict[str, int] | None = None,
     comparison: bool = False,
+    field_of_view: CoveringSector | None = None,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -278,6 +283,7 @@ def render_frame_image(
         show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
+        field_of_view=field_of_view,
     )
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
@@ -430,6 +436,7 @@ def render_situation(
     output_root: Path,
     rendered_components: list[str],
     overlay_data: OverlayData | None = None,
+    fov_source=None,
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
     output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -514,6 +521,7 @@ def render_situation(
             x_pass_version=xpass.x_pass_version if xpass else getattr(args, "x_pass_version", "top10"),
         )
 
+    sectors = hawkeye_field_of_view(fov_source, situation, inference_frame_ids)
     if selected_output_mode == "png":
         for frame_selection in selected_frames:
             frame_id = int(frame_selection["frame_id"])
@@ -531,6 +539,7 @@ def render_situation(
                     selection_labels=selection_labels,
                     selections_enabled=bool(getattr(args, "selections", False)),
                     selection_denominators=overlay_stats["selection_denominators"],
+                    field_of_view=sectors.get(frame_id),
                 )
             output_paths.extend(save_component_pngs(
                 component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
@@ -552,6 +561,7 @@ def render_situation(
                         selection_labels=selection_labels,
                         selections_enabled=bool(getattr(args, "selections", False)),
                         selection_denominators=overlay_stats["selection_denominators"],
+                        field_of_view=sectors.get(frame_id),
                     )
 
             output_path = output_dir / f"{component_name}.{selected_output_mode}"
@@ -601,7 +611,9 @@ def main() -> None:
     available_ids.update({k: v for k, v in explicit_model_ids.items() if v})
     component_selection = select_inference_components(args, available_ids)
     model_selection = confirm_visualization_selection(available_ids, args, output_root)
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        load_hawkeye_tracking(args.tracking_csv), clean_hawkeye_tracking, args,
+    )
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     requested_situation_ids = [str(value) for value in (args.situation_id or [])]
     requested_action_ids = [str(value) for value in (args.action_id or [])]
@@ -729,6 +741,8 @@ def main() -> None:
         )
         if overlay_data is not None:
             render_kwargs["overlay_data"] = overlay_data
+        if fov_source is not None:
+            render_kwargs["fov_source"] = fov_source
         output_dir, runtime_physical_stats, render_info = render_situation(**render_kwargs)
         if runtime_physical_stats:
             physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats

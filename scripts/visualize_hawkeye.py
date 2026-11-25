@@ -78,9 +78,13 @@ from scripts.visualization_selection import (
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+from scripts.visualization_field_of_view import (
+    CoveringSector, add_field_of_view_argument, hawkeye_field_of_view, prepare_hawkeye_visualization_tracking,
+)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_field_of_view_argument(parser)
     parser.add_argument("--decomposition", action="store_true", help="Add occurrence x severity labels to individual outcomes from decomposition checkpoints; other selected plots render normally.")
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical distributions when comparing checkpoints; saved-component mode has no model logits.")
     add_compare_argument(parser)
@@ -241,6 +245,7 @@ def render_frame_image(
     selections_enabled: bool = False,
     selection_denominators: dict[str, int] | None = None,
     comparison: bool = False,
+    field_of_view: CoveringSector | None = None,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -278,6 +283,7 @@ def render_frame_image(
         show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
+        field_of_view=field_of_view,
     )
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
@@ -552,7 +558,9 @@ def run_location_visualization(
     )
     component_selection, xpass = select_saved_components(
         args, component_export, component_metadata, "hawkeye_loc", resolve_saved_xpass, component_id=component_run_id)
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        load_hawkeye_tracking(args.tracking_csv), clean_hawkeye_tracking, args,
+    )
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     overlay_data = load_overlay_data(
         include_coach_ratings=bool(args.coach_ratings),
@@ -611,6 +619,7 @@ def run_location_visualization(
             [float(location_row["resolved_time_norm"])],
         )[0]
         frame_id = int(frame_selection["frame_id"])
+        sectors = hawkeye_field_of_view(fov_source, situation, [frame_id])
         coach_scores, selection_labels, overlay_stats = build_situation_overlays(
             overlay_data,
             action_id,
@@ -642,6 +651,7 @@ def run_location_visualization(
                 selection_labels=selection_labels,
                 selections_enabled=bool(args.selections),
                 selection_denominators=overlay_stats["selection_denominators"],
+                field_of_view=sectors.get(frame_id),
             )
         output_paths.extend(save_component_pngs(component_names, render_selected_component, output_dir))
         print(f"Saved Hawkeye {mode} PNG visualizations to {output_dir}")
@@ -730,7 +740,9 @@ def run_tracking_only_visualization(
     output_root: Path,
     visualization_run_id: str,
 ) -> None:
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        load_hawkeye_tracking(args.tracking_csv), clean_hawkeye_tracking, args,
+    )
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     situation_ids = resolve_tracking_situation_ids(tracking, args.situation_id)
     selected_output_mode = output_mode(args)
@@ -759,6 +771,7 @@ def run_tracking_only_visualization(
                 requested_time_norms(args),
             )
             selected_frame_ids = [int(item["frame_id"]) for item in selected_frames]
+            sectors = hawkeye_field_of_view(fov_source, situation, selected_frame_ids)
             for frame_selection in selected_frames:
                 frame_id = int(frame_selection["frame_id"])
                 image = render_frame_image(
@@ -767,6 +780,7 @@ def run_tracking_only_visualization(
                     "tracking",
                     None,
                     show_trajectories=args.show_trajectories,
+                    field_of_view=sectors.get(frame_id),
                 )
                 output_path = output_dir / f"tracking_{frame_selection['label']}.png"
                 image.save(output_path)
@@ -784,6 +798,8 @@ def run_tracking_only_visualization(
                 )
                 resolved_time_norm_ranges[str(situation_id)] = selected_range
 
+            sectors = hawkeye_field_of_view(fov_source, situation, selected_frame_ids)
+
             def iter_tracking_images():
                 for frame_id in selected_frame_ids:
                     yield render_frame_image(
@@ -792,6 +808,7 @@ def run_tracking_only_visualization(
                         "tracking",
                         None,
                         show_trajectories=args.show_trajectories,
+                        field_of_view=sectors.get(frame_id),
                     )
 
             output_path = output_dir / f"tracking.{selected_output_mode}"
@@ -915,7 +932,9 @@ def main() -> None:
         return
     component_selection, xpass = select_saved_components(
         args, component_export, component_metadata, "hawkeye", resolve_saved_xpass, component_id=component_run_id)
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    tracking, fov_source = prepare_hawkeye_visualization_tracking(
+        load_hawkeye_tracking(args.tracking_csv), clean_hawkeye_tracking, args,
+    )
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     if component_export is not None:
         situation_ids = resolve_hawkeye_component_situation_ids(
@@ -1013,6 +1032,7 @@ def main() -> None:
                 x_pass_version=xpass.x_pass_version,
             )
 
+        sectors = hawkeye_field_of_view(fov_source, situation, physical_frame_ids)
         if selected_output_mode == "png":
             for frame_selection in selected_frames:
                 frame_id = int(frame_selection["frame_id"])
@@ -1029,6 +1049,7 @@ def main() -> None:
                         selection_labels=selection_labels,
                         selections_enabled=bool(getattr(args, "selections", False)),
                         selection_denominators=overlay_stats["selection_denominators"],
+                        field_of_view=sectors.get(frame_id),
                     )
                 output_paths.extend(save_component_pngs(
                     component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
@@ -1048,6 +1069,7 @@ def main() -> None:
                             selection_labels=selection_labels,
                             selections_enabled=bool(getattr(args, "selections", False)),
                             selection_denominators=overlay_stats["selection_denominators"],
+                            field_of_view=sectors.get(frame_id),
                         )
 
                 output_path = output_dir / f"{component_name}.{selected_output_mode}"
