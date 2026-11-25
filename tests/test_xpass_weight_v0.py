@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch_geometric.loader import DataLoader
 
+import dataset
 import inference
 import physical_pass_model as physics
 from datatools import config, metadata_summary
@@ -193,6 +194,57 @@ def test_combined_v0_evaluation_preserves_raw_values_and_reports_zero_weight():
     np.testing.assert_array_equal(diagnostic["predictors"]["combined_v0"], [0., 1., .123456789012345])
     np.testing.assert_array_equal(diagnostic["combined_learning_weight"], np.zeros(3))
     assert metrics["combined_learning_weight_mean"] == metrics["combined_learning_weight_max"] == 0.
+
+
+@pytest.mark.parametrize("missing", [None, "action", "receiver"])
+def test_evaluation_dataset_looks_up_xpass_without_copying_cache_metadata(tmp_path, monkeypatch, missing):
+    class MatchMetadata(dict):
+        def __deepcopy__(self, memo):
+            pytest.fail("Evaluation row lookup copied the full xPass cache metadata")
+
+    feature_dir = tmp_path / "features"
+    label_dir = tmp_path / "labels"
+    feature_dir.mkdir()
+    label_dir.mkdir()
+    action_ids = [7, 8, 9]
+    values = [0., 1., .123456789012345]
+    torch.save([make_graph(["home_1", "home_2"]) for _ in action_ids], feature_dir / "match_1.pt")
+    torch.save(torch.stack([make_label(action_index=i) for i in action_ids]), label_dir / "match_1.pt")
+
+    rows = pd.DataFrame({"home_1": [.5] * len(values), "home_2": values}, index=action_ids)
+    if missing == "action":
+        rows = rows.drop(index=9)
+    if missing == "receiver":
+        rows = rows.drop(columns="home_2")
+    rows.attrs["physical_xpass_cache_metadata"] = MatchMetadata(source=physics.PC_XPASS_SOURCE)
+    # The bare player column is usable only with the matching default metric.
+    rows.attrs["physical_xpass_default_metric"] = "top10_xpass"
+    calls = []
+
+    def load_rows(cache_root, match_id, *, frame_scope):
+        calls.append(match_id)
+        assert frame_scope == physics.PHYSICAL_XPASS_FRAME_SCOPE_ACTION
+        return rows
+
+    monkeypatch.setattr(dataset, "load_physical_xpass_match", load_rows)
+
+    def build():
+        return dataset.ActionDataset(
+            ["match_1"], feature_dir=feature_dir, label_dir=label_dir, task="pass_success",
+            evaluation_xpass_cache_dir=tmp_path / "xpass", evaluation_xpass_metric="top10_xpass",
+        )
+
+    if missing == "action":
+        with pytest.raises(FileNotFoundError, match="no row for action_index=9"):
+            build()
+    elif missing == "receiver":
+        with pytest.raises(ValueError, match="missing observed target player column 'home_2'"):
+            build()
+    else:
+        actual = torch.stack([getattr(graph, physics.EVALUATION_XPASS_RAW_PROB_ATTR)[1]
+                              for graph in build().features])
+        torch.testing.assert_close(actual, torch.tensor(values, dtype=torch.float64), rtol=0, atol=0)
+    assert calls == ["match_1"]
 
 
 INFERENCE_COMMANDS = [

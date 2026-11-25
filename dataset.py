@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
@@ -648,7 +649,7 @@ class ActionDataset(Dataset):
         self.labels = []
         physical_rows_by_match: dict[str, object] = {}
         pass_height_rows_by_match: dict[str, object] = {}
-        evaluation_xpass_rows_by_match: dict[str, object] = {}
+        evaluation_xpass_rows_by_match: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
         lane_survival_rows_by_match: dict[str, object] = {}
 
         for i in tqdm(condition.nonzero()[:, 0].numpy()):
@@ -850,20 +851,25 @@ class ActionDataset(Dataset):
                 else:
                     match_id = feature_match_ids[int(i)]
                     if match_id not in evaluation_xpass_rows_by_match:
-                        evaluation_xpass_rows_by_match[match_id] = load_physical_xpass_match(
+                        physical_rows = load_physical_xpass_match(
                             evaluation_xpass_cache_root,
                             match_id,
                             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
                         )
+                        # Row selection copies attrs. Share the data without the cache metadata.
+                        lookup_rows = pd.DataFrame(physical_rows, copy=False)
+                        evaluation_xpass_rows_by_match[match_id] = (physical_rows, lookup_rows)
+                    physical_rows, lookup_rows = evaluation_xpass_rows_by_match[match_id]
                     graph = attach_evaluation_xpass_to_graph(
                         graph,
                         graph_labels,
-                        evaluation_xpass_rows_by_match[match_id],
+                        physical_rows,
                         match_id=match_id,
                         metric=evaluation_xpass_metric,
                         frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
                         require_nearest_opponent_distance=self.evaluation_xpass_require_nearest,
                         require_pass_height=self.evaluation_xpass_require_height,
+                        lookup_rows=lookup_rows,
                     )
 
             if pass_distance_cache_dir is not None and not bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):

@@ -7152,11 +7152,14 @@ def attach_evaluation_xpass_to_graph(
     frame_scope: str | None = None,
     require_nearest_opponent_distance: bool = False,
     require_pass_height: bool = False,
+    lookup_rows: pd.DataFrame | None = None,
 ) -> Data:
-    """Attach strict read-only evaluation sidecars without replacing model input attributes."""
+    """Attach evaluation sidecars, optionally looking up rows in an attrs-free view of physical_rows."""
     if require_pass_height:
         from pc_xpass_resume import assert_height_readable
         assert_height_readable(physical_rows.attrs.get("physical_xpass_cache_metadata", {}))
+    action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    row = lookup_rows.loc[action_index] if lookup_rows is not None and action_index in lookup_rows.index else None
     sidecar_graph = attach_physical_xpass_to_graph(
         graph.clone(),
         labels,
@@ -7166,6 +7169,7 @@ def attach_evaluation_xpass_to_graph(
         metric=metric,
         missing_player_value=None,
         frame_scope=frame_scope,
+        row=row,
     )
     setattr(graph, EVALUATION_XPASS_PROB_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_PROB_ATTR))
     setattr(graph, EVALUATION_XPASS_RAW_PROB_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_RAW_PROB_ATTR))
@@ -7178,7 +7182,6 @@ def attach_evaluation_xpass_to_graph(
     setattr(graph, EVALUATION_XPASS_PASS_HEIGHT_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR))
     target_index = int(labels[LABEL_INDEX["intent_index"]].item())
     node_ids = _node_ids(graph)
-    action_index = int(labels[LABEL_INDEX["action_index"]].item())
     receiver_id = node_ids[target_index] if 0 <= target_index < len(node_ids) else f"index={target_index}"
     if require_nearest_opponent_distance and not bool(
         torch.isfinite(getattr(graph, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR)[target_index]).item()
